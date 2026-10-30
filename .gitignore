@@ -1,0 +1,22 @@
+# ===== 真实数据绝不入库（模板在 data_template/，本地数据在 data/）=====
+data/
+!data_template/
+data_template/experiments/*/DATA.xlsx
+data_template/experiments/*/eme.db
+
+# ===== 运行产物 =====
+__pycache__/
+*.pyc
+.scratch/
+*.log
+
+# ===== 打包产物 =====
+eme_db/build/
+eme_db/dist/
+eme_db/dist*/
+eme_db/*.spec
+
+# ===== 系统杂项 =====
+.DS_Store
+Thumbs.db
+~$*.xlsx

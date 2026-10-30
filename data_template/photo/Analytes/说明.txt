@@ -1,0 +1,1 @@
+把分析物结构式图片放这里，文件名=物质名（如 Caffeine.png、支持 -structures 后缀变体）。
