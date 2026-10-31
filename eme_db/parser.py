@@ -240,8 +240,18 @@ def parse_wide_area_rt(area_path: str | Path, rt_path: str | Path | None,
 _PATTERN_COMPILE_CACHE = {}
 
 
+# 旧版预设正则（相位仅 [AS]）→ 新版（含 D）：存库的全局/实验级格式透明升级，
+# 无需用户重新设置；D 命名随后由解析归一化为 S
+_LEGACY_PHASE_PATTERNS = {
+    r"^(?P<g>\d+)-(?P<ph>[AS])-(?P<r>\d+)$": r"^(?P<g>\d+)-(?P<ph>[ASD])-(?P<r>\d+)$",
+    r"^(?P<ph>[AS])(?P<g>\d+)-(?P<r>\d+)$": r"^(?P<ph>[ASD])(?P<g>\d+)-(?P<r>\d+)$",
+}
+
+
 def compile_sample_pattern(fmt: str):
     """编译样品名称正则（带缓存）。必须含命名组 g/ph/r，否则回退内置默认。"""
+    if fmt in _LEGACY_PHASE_PATTERNS:
+        fmt = _LEGACY_PHASE_PATTERNS[fmt]
     rx = _PATTERN_COMPILE_CACHE.get(fmt)
     if rx is None:
         try:
@@ -278,7 +288,10 @@ def parse_sample_name(name: str, pattern: str | None = None):
         except Exception:
             return None
     try:
-        return int(g), str(ph).upper(), int(r)
+        _ph = str(ph).upper()
+        if _ph == "D":  # 供体相 D 命名 → 系统内部统一记作 S
+            _ph = "S"
+        return int(g), _ph, int(r)
     except (TypeError, ValueError):
         return None
 
@@ -508,7 +521,8 @@ def parse_experiment(
         ext = df["sample"].where(is_smp, "").str.extract(_sample_rx.pattern)
         ext = ext.rename(columns={"g": "group", "ph": "phase", "r": "replicate"})
         df["group"] = pd.to_numeric(ext["group"], errors="coerce").astype("Int64")
-        df["phase"] = ext["phase"]
+        # 供体相 D 命名 → 内部统一记作 S（下游 相位判断/M分表/剔除 全按 A/S 消费）
+        df["phase"] = ext["phase"].str.upper().replace({"D": "S"})
         df["replicate"] = pd.to_numeric(ext["replicate"], errors="coerce").astype("Int64")
     else:
         df["group"] = pd.Series(dtype="object")

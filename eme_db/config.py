@@ -78,8 +78,8 @@ SLM_PHOTO_DIR = PHOTO_DIR / "SLM"
 # 定量离子对：默认取每个物质的第 1 个离子对（如 Methotrexate-1）
 DEFAULT_ION_PAIR = 1
 
-# 正向提取样本的正则：组号-A/S-重复号，如 1-A-1, 12-S-3
-SAMPLE_NAME_PATTERN = r"^(?P<g>\d+)-(?P<ph>[AS])-(?P<r>\d+)$"
+# 正向提取样本的正则：组号-A/S-重复号，如 1-A-1, 12-S-3；供体相也接受 D（归一化为 S）
+SAMPLE_NAME_PATTERN = r"^(?P<g>\d+)-(?P<ph>[ASD])-(?P<r>\d+)$"
 
 # 默认质控样/空白样名称（本次实验与默认不一致时由用户在界面输入）
 DEFAULT_STD_ACCEPTOR = "Accept-STD-100ppb-1"   # 受体相标准品（两相溶液相同时也用这个）

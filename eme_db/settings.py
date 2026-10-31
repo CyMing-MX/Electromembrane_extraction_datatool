@@ -126,8 +126,8 @@ def get_sample_format() -> str:
 
 
 SAMPLE_FORMAT_PRESETS = {
-    "组-相-重复（如 1-A-1）": r"^(?P<g>\d+)-(?P<ph>[AS])-(?P<r>\d+)$",
-    "相组-重复（如 A1-1）": r"^(?P<ph>[AS])(?P<g>\d+)-(?P<r>\d+)$",
+    "组-相-重复（如 1-A-1，供体相可用 D）": r"^(?P<g>\d+)-(?P<ph>[ASD])-(?P<r>\d+)$",
+    "相组-重复（如 A1-1，供体相可用 D）": r"^(?P<ph>[ASD])(?P<g>\d+)-(?P<r>\d+)$",
 }
 
 
