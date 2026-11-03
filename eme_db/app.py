@@ -4078,6 +4078,13 @@ def page_custom_dashboard():
                 xcol, ycol = xy.get("x"), xy.get("y")
                 d = d_panel.copy()
                 d["_x"] = d[xcol].map(R._try_float if REF_OK else float) if xcol in d.columns else None
+                # 防静默空图：X 全空时给出可操作原因（物质名匹配不上信息库 / 列全缺）
+                if d["_x"].notna().sum() == 0 and len(d):
+                    _matched = d["analyte"].map(lambda a: R.get_analyte_info(a) is not None).sum() if REF_OK else 0
+                    st.caption(f"⚠️ 此图无数据点：X 轴列「{xcol}」在本面板 {len(d)} 个"
+                               f"物质上均无值——{len(d)} 个物质名只有 {_matched} 个能匹配到分析物信息表"
+                               "（质谱导出名若是缩写，请在信息表加一列缩写（列名需含“名”或“name”，"
+                               "如 short_name）并点「信息库→🔄刷新」）；若 X 是随pH派生列，则该组缺供体相pH。") if REF_OK else None
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
                     x=d["_x"], y=d[ycol], mode="markers",
