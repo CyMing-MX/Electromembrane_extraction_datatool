@@ -1,0 +1,4 @@
+# 批处理文件必须保持 CRLF（LF 会导致 cmd 的 goto 标签定位失效）
+*.bat text eol=crlf
+# 其余文本按仓库默认
+* text=auto
