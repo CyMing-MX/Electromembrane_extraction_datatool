@@ -451,6 +451,181 @@ def get_std_rsd_by_analyte(df: pd.DataFrame, analytes: list[str]) -> dict[str, f
     return out
 
 
+# ---------- 自动剔除规划器（2026-11-06，按用户确认的设计） ----------
+#
+# 两种模式，均只产出"建议剔除清单"，由用户核对后手动保存：
+#   保守（conservative）：全池找最优的 1 个候选，接受条件 = 超阈物质数 ↓≥min_n_gain
+#       或 RSD 累加相对降幅 ≥min_rsd_rel，且 Dixon Q 检验达标；只执行这一次。
+#   激进（aggressive）：循环剔除，每轮取（Δ超阈数 ↓，ΔRSD累加 ↓，Q ↓）字典序最优；
+#       停止条件 = 下限（针/重复数）或 无改进（Δ超阈≤0 且 RSD累加相对降幅 < stop_rel）
+#       或 最优候选 Q 不达标。
+# Q 检验 = Dixon Q（小样本重复测定的标准离群检验，95% 单侧临界值表）。
+# 候选块结构统一：标准品（同名各针）与样本（同组同相各重复）同构——
+#   每个候选单元提供一个 {物质: 峰面积}，目标 = 该块内各物质 RSD% 的
+#   超阈(>15%)个数 与 累加值。
+
+_DIXON_Q_CRIT_95 = {3: 0.941, 4: 0.765, 5: 0.642, 6: 0.560,
+                    7: 0.507, 8: 0.468, 9: 0.437, 10: 0.412}
+
+
+def _dixon_q(vals: list[float], unit_key) -> float:
+    """候选单元的 Dixon Q 值：只有块内极值才可能离群；非极值返回 0。
+    vals 为 {unit_key: {analyte: 值}} 展开前的逐物质比较——对每个物质算 Q，
+    取候选在各物质上的最大 Q（候选只要在某物质上是统计离群即算有证据），
+    并附带 driving 物质名。返回 (q, analyte)。"""
+    units = list(vals.keys())
+    idx = units.index(unit_key)
+    analytes = set()
+    for u in units:
+        analytes |= {a for a, v in vals[u].items() if v is not None and not (isinstance(v, float) and v != v)}
+    best_q, best_a = 0.0, None
+    for a in sorted(analytes):
+        series = [vals[u].get(a) for u in units]
+        series = [v for v in series if v is not None and not (isinstance(v, float) and v != v)]
+        n = len(series)
+        if n < 3:
+            continue
+        q_crit = _DIXON_Q_CRIT_95.get(min(n, 10), 0.40)
+        s = sorted(series)
+        rng = s[-1] - s[0]
+        if rng <= 0:
+            continue
+        v = vals[unit_key].get(a)
+        if v is None or (isinstance(v, float) and v != v):
+            continue
+        if v == s[-1]:
+            gap = v - s[-2]
+        elif v == s[0]:
+            gap = s[1] - v
+        else:
+            continue  # 非极值：Dixon 不适用
+        q = gap / rng
+        if q >= q_crit and q > best_q:
+            best_q, best_a = q, a
+    return best_q, best_a
+
+
+def _block_stats(vals: dict, excluded: set, threshold: float = 15.0):
+    """块统计：excluded 为被剔 unit_key 集合。返回 (n_over, rsd_sum, {analyte: rsd})。
+    每物质有效值 <2 个时 RSD 记 0（与主表口径一致，不计入超阈）。"""
+    analytes = set()
+    for u in vals:
+        analytes |= set(vals[u].keys())
+    n_over, rsd_sum, per = 0, 0.0, {}
+    for a in sorted(analytes):
+        kept = [vals[u][a] for u in vals
+                if u not in excluded and vals[u].get(a) is not None
+                and not (isinstance(vals[u][a], float) and vals[u][a] != vals[u][a])]
+        if len(kept) < 2:
+            per[a] = 0.0
+            continue
+        m = float(np.mean(kept))
+        if m == 0:
+            per[a] = 0.0
+            continue
+        r = float(np.std(kept, ddof=1)) / m * 100.0
+        per[a] = r
+        rsd_sum += r
+        if r > threshold:
+            n_over += 1
+    return n_over, rsd_sum, per
+
+
+def plan_auto_exclusion(blocks: dict, floors: dict, mode: str = "conservative",
+                        min_n_gain: int = 1, min_rsd_rel: float = 0.05,
+                        stop_rel: float = 0.01) -> dict:
+    """自动剔除规划器（纯函数，不触碰数据）。
+
+    blocks  : {block_key: {"units": {unit_key: {analyte: 峰面积或None}},
+                           "floor": int}}     floor=该块允许保留的最少单元数
+    floors  : 未指定块级 floor 时的缺省（如 {"std": 2, "sample": 2}）
+    mode    : "conservative" | "aggressive"
+    min_n_gain / min_rsd_rel : 保守模式接受阈值（超阈↓个数 / RSD累加相对降幅）
+    stop_rel: 激进模式"无改进"判据（RSD累加相对降幅低于此即停）
+
+    返回 {"excluded": {block_key: [unit_key...]},          # 建议剔除（按执行顺序）
+          "steps": [{...审计信息...}],
+          "before": {block_key: (n_over, rsd_sum)},
+          "after":  {block_key: (n_over, rsd_sum)},
+          "blocked": [{unit_key, block_key, reason}]}      # 有改善但被Q拦下的候选
+    """
+    vals_all = {bk: b["units"] for bk, b in blocks.items()}
+    floor_of = {}
+    for bk, b in blocks.items():
+        base = b.get("floor")
+        floor_of[bk] = base if base is not None else floors.get("default", 2)
+
+    before = {bk: _block_stats(vals_all[bk], set()) for bk in blocks}
+    excluded = {bk: set() for bk in blocks}
+    steps, blocked = [], []
+
+    def _all_stats():
+        return {bk: _block_stats(vals_all[bk], excluded[bk]) for bk in blocks}
+
+    def _best_candidate():
+        best = None
+        for bk in blocks:
+            cur_n, cur_sum, _ = _block_stats(vals_all[bk], excluded[bk])
+            n_units = len(vals_all[bk]) - len(excluded[bk])
+            if n_units <= floor_of[bk]:
+                continue
+            _live = {u: vals_all[bk][u] for u in vals_all[bk] if u not in excluded[bk]}
+            for uk in _live:
+                q, qa = _dixon_q(_live, uk)
+                after_n, after_sum, _ = _block_stats(vals_all[bk], excluded[bk] | {uk})
+                d_n = cur_n - after_n
+                d_sum = cur_sum - after_sum
+                d_rel = d_sum / cur_sum if cur_sum > 0 else 0.0
+                cand = {"block": bk, "unit": uk, "q": q, "q_analyte": qa,
+                        "d_n": d_n, "d_sum": d_sum, "d_rel": d_rel,
+                        "before": (cur_n, cur_sum), "after": (after_n, after_sum)}
+                if best is None:
+                    best = cand
+                    continue
+                # 字典序：Δ超阈 ↓ 优先，其次 ΔRSD累加 ↓，其次 Q ↓
+                if (cand["d_n"], cand["d_sum"], cand["q"]) > (best["d_n"], best["d_sum"], best["q"]):
+                    best = cand
+        return best
+
+    if mode == "conservative":
+        best = _best_candidate()
+        if best is None:
+            return {"excluded": excluded, "steps": [], "before": before,
+                    "after": _all_stats(), "blocked": blocked}
+        # Q 检验（_dixon_q 内部已按各物质 n 对照 95% 临界值，q=0 即无离群证据）
+        if not best["q"]:
+            blocked.append({**best, "reason": "Q 检验不达标（候选不是块内统计离群点）"})
+            return {"excluded": excluded, "steps": [], "before": before,
+                    "after": _all_stats(), "blocked": blocked}
+        accepts = (best["d_n"] >= min_n_gain) or (best["d_rel"] >= min_rsd_rel)
+        if not accepts:
+            blocked.append({**best, "reason": f"有改善但未达保守阈值（需超阈↓≥{min_n_gain} 个或 RSD累加↓≥{min_rsd_rel:.0%}）"})
+            return {"excluded": excluded, "steps": [], "before": before,
+                    "after": _all_stats(), "blocked": blocked}
+        excluded[best["block"]].add(best["unit"])
+        steps.append({**best, "mode": "conservative"})
+        return {"excluded": excluded, "steps": steps, "before": before,
+                "after": _all_stats(), "blocked": blocked}
+
+    # aggressive
+    while True:
+        stats = _all_stats()
+        best = _best_candidate()
+        if best is None:
+            break
+        # 停止条件：无改进
+        if best["d_n"] <= 0 and best["d_rel"] < stop_rel:
+            break
+        # 停止条件：最优候选 Q 不达标
+        if not best["q"]:
+            blocked.append({**best, "reason": "Q 检验不达标，停止继续剔除"})
+            break
+        excluded[best["block"]].add(best["unit"])
+        steps.append({**best, "mode": "aggressive"})
+    return {"excluded": excluded, "steps": steps, "before": before,
+            "after": _all_stats(), "blocked": blocked}
+
+
 # ---------- 命令行自检 ----------
 if __name__ == "__main__":
     import sys

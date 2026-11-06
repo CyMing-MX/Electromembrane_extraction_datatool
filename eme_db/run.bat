@@ -35,7 +35,7 @@ echo  Starting server (first load takes a while)...
 echo ============================================
 echo.
 
-start "" /b "%PY%" -m streamlit run app.py --server.headless=true --server.port=%PORT% --browser.gatherUsageStats=false
+start "" /b "%PY%" -m streamlit run app.py --server.headless=true --server.port=%PORT% --browser.gatherUsageStats=false --client.toolbarMode=minimal
 
 REM Wait until port is ready (max 60s), then open browser once
 set /a TRIES=0

@@ -176,7 +176,7 @@ def purge_custom_reagents(lib_names) -> list:
 CMAP_OPTIONS = ["RdYlGn", "viridis", "plasma", "Blues", "RdBu", "YlGnBu", "coolwarm"]
 
 
-def get_cmap_pref(default: str = "RdYlGn") -> str:
+def get_cmap_pref(default: str = "viridis") -> str:  # 色盲友好默认（RdYlGn 保留为可选项）
     """上次使用的配色名；非法值回退 default"""
     v = get_setting("CMAP_PREFERENCE", default)
     return v if v in CMAP_OPTIONS else default

@@ -125,6 +125,7 @@ def main():
         "--server.headless=true",
         f"--server.port={port}",
         "--browser.gatherUsageStats=false",
+        "--client.toolbarMode=minimal",
         "--server.fileWatcherType=none",  # frozen 下禁用文件监视，避免 watchdog 报错
     ]
     return stcli.main()

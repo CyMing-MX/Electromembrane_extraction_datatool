@@ -63,6 +63,10 @@ st.markdown("""
     .stDataFrame {border-radius: 8px; overflow: hidden;}
     /* 提示条 */
     [data-testid="stAlert"] {border-radius: 10px;}
+    /* 辅助文字对比度（实测 3.6~3.7:1 → 提至 ≥4.5:1） */
+    [data-testid="stCaptionContainer"] {color: #57585e;}
+    /* 本地工具用不到 Deploy / 运行管理按钮 */
+    [data-testid="stHeader"] [data-testid="stToolbar"] {visibility: hidden; height: 0;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -281,1578 +285,1662 @@ def render_slm_sidebar(slm_name: str):
 def page_new_experiment():
     st.title("➕ 新增实验")
 
-    st.subheader("1) 选择实验文件夹")
-    exp_root = config.EXPERIMENTS_DIR
-    if not exp_root.exists():
-        exp_root.mkdir(parents=True, exist_ok=True)
+    # —— 录入步骤导航（每步聚焦一个决策；其它步骤可手动展开查看，内容不丢失）——
+    _NE_STEPS = ["1 选择文件夹", "2 质控样", "3 元数据", "3.5 电流记录", "4 萃取条件", "5 生成", "6 标准品检查"]
+    st.session_state.setdefault("ne_step", _NE_STEPS[0])
+    # 上一步/下一步按钮设置"请求键"，在 radio 实例化前预置其控件状态
+    _step_req = st.session_state.pop("ne_step_req", None)
+    if _step_req in _NE_STEPS:
+        st.session_state["ne_step_w"] = _step_req
+        st.session_state["ne_step"] = _step_req
+    _si = _NE_STEPS.index(st.session_state["ne_step"]) if st.session_state["ne_step"] in _NE_STEPS else 0
+    _ne_step = st.radio("录入步骤", _NE_STEPS, horizontal=True, index=_si, key="ne_step_w")
+    st.session_state["ne_step"] = _ne_step
+    _nc_prev, _nc_next, _nc_sp = st.columns([1, 1, 4])
+    if _nc_prev.button("⬅ 上一步", disabled=(_si == 0), key="ne_step_prev"):
+        st.session_state["ne_step_req"] = _NE_STEPS[max(0, _si - 1)]; st.rerun()
+    if _nc_next.button("下一步 ➡", disabled=(_si == len(_NE_STEPS) - 1), key="ne_step_next"):
+        st.session_state["ne_step_req"] = _NE_STEPS[min(len(_NE_STEPS) - 1, _si + 1)]; st.rerun()
+    _nc_sp.caption(f"步骤 {_si + 1}/{len(_NE_STEPS)}——当前步骤已展开；其余步骤内容仍在运行，可手动展开查看。")
+    with st.expander("1) 选择实验文件夹", expanded=(st.session_state.get("ne_step") == "1 选择文件夹")):
+        exp_root = config.EXPERIMENTS_DIR
+        if not exp_root.exists():
+            exp_root.mkdir(parents=True, exist_ok=True)
 
-    # —— 方式A：直接拖入数据文件（自动创建实验文件夹）——
-    with st.expander("📤 直接拖入数据文件（自动创建实验文件夹）"):
-        up_files = st.file_uploader(
-            "拖入或选择本次实验的 txt 数据文件（ALLDATA / AREA / RT，可多选）",
-            type=["txt"], accept_multiple_files=True, key="ne_upload")
-        if up_files:
-            default_new = f"{date.today().strftime('%Y%m%d')}-{len(up_files)}F"
-            new_name = st.text_input("新实验文件夹名", value=default_new, key="ne_new_folder")
-            if st.button("💾 保存到实验文件夹并解析", key="ne_save_upload"):
-                target = exp_root / new_name
-                target.mkdir(parents=True, exist_ok=True)
-                saved = []
-                for f in up_files:
-                    out = target / f.name
-                    out.write_bytes(f.getvalue())
-                    saved.append(f.name)
-                st.success(f"已保存 {len(saved)} 个文件到 `{target}`：{', '.join(saved)}")
-                st.rerun()
-        st.caption("保存后该文件夹会出现在下方下拉框中，选择即可继续。")
+        # —— 方式A：直接拖入数据文件（自动创建实验文件夹）——
+        with st.expander("📤 直接拖入数据文件（自动创建实验文件夹）"):
+            up_files = st.file_uploader(
+                "拖入或选择本次实验的 txt 数据文件（ALLDATA / AREA / RT，可多选）",
+                type=["txt"], accept_multiple_files=True, key="ne_upload")
+            if up_files:
+                default_new = f"{date.today().strftime('%Y%m%d')}-{len(up_files)}F"
+                new_name = st.text_input("新实验文件夹名", value=default_new, key="ne_new_folder")
+                if st.button("💾 保存到实验文件夹并解析", key="ne_save_upload"):
+                    target = exp_root / new_name
+                    target.mkdir(parents=True, exist_ok=True)
+                    saved = []
+                    for f in up_files:
+                        out = target / f.name
+                        out.write_bytes(f.getvalue())
+                        saved.append(f.name)
+                    st.success(f"已保存 {len(saved)} 个文件到 `{target}`：{', '.join(saved)}")
+                    st.rerun()
+            st.caption("保存后该文件夹会出现在下方下拉框中，选择即可继续。")
 
-    # —— 方式B：选择已有实验文件夹 ——
-    folders = sorted([p.name for p in exp_root.iterdir() if p.is_dir()])
-    if not folders:
-        st.info(f"请先拖入数据文件，或在 `{exp_root}` 下创建实验文件夹（如 20260809-12M）并放入 ALLDATA/AREA+RT txt。")
-        return
-    sel = st.selectbox("实验文件夹", ["（请选择）"] + folders, key="ne_folder")
-    if sel == "（请选择）":
-        return
+        # —— 方式B：选择已有实验文件夹 ——
+        folders = sorted([p.name for p in exp_root.iterdir() if p.is_dir()])
+        if not folders:
+            st.info(f"请先拖入数据文件，或在 `{exp_root}` 下创建实验文件夹（如 20260809-12M）并放入 ALLDATA/AREA+RT txt。")
+            return
+        sel = st.selectbox("实验文件夹", ["（请选择）"] + folders, key="ne_folder")
+        if sel == "（请选择）":
+            return
 
-    folder = exp_root / sel
+        folder = exp_root / sel
 
-    # 自动回填：该实验已录入过时，把数据库中保存的录入信息注入表单默认值
-    conn_ne = get_db()
-    _erow = conn_ne.execute("SELECT * FROM experiments WHERE folder=?", (sel,)).fetchone()
-    if st.session_state.get("_ne_loaded_folder") != sel:
-        st.session_state["_ne_loaded_folder"] = sel
-        # 多标准品组合编辑器控件键（ne_combo_*）不含文件夹维度：切文件夹时清掉，
-        # 防止 A 实验的组合名/角色下拉旧值经控件状态串到 B 实验并存库
-        import re as _re_combo
-        for _k in [k for k in list(st.session_state.keys()) if _re_combo.match(r"^ne_combo_", str(k))]:
-            st.session_state.pop(_k, None)
-        if _erow is None:
-            # 切到未录入过的文件夹：把表单控件显式写回默认值。
-            st.session_state["ne_sample_fmt"] = "跟随全局设置"
-            st.session_state.pop("ne_sample_fmt_re", None)
-            st.session_state["ne_multi_qc"] = False
-            st.session_state.pop("ne_qc_combos", None)
-            st.session_state.pop("_ne_quick_state", None)
-            st.session_state.pop("_ne_detail_state", None)
-            st.session_state.pop("_ne_last_group_mode", None)
-            import re as _re_sync
-            for _k in [k for k in list(st.session_state.keys())
-                       if _re_sync.match(r"^g\d+_(ov_|label$|well$|abw$|note$|tags$|qc_combo$|slm_main$|pH_donor$|pH_acceptor$|extract_time$|extract_voltage$|donor_composition$|donor_buffer_conc$|acceptor_composition$|acceptor_buffer_conc$|donor_additives$|acceptor_additives$|slm_additives$|.*_pct_)", k)]:
+        # 自动回填：该实验已录入过时，把数据库中保存的录入信息注入表单默认值
+        conn_ne = get_db()
+        _erow = conn_ne.execute("SELECT * FROM experiments WHERE folder=?", (sel,)).fetchone()
+        if st.session_state.get("_ne_loaded_folder") != sel:
+            st.session_state["_ne_loaded_folder"] = sel
+            # 多标准品组合编辑器控件键（ne_combo_*）不含文件夹维度：切文件夹时清掉，
+            # 防止 A 实验的组合名/角色下拉旧值经控件状态串到 B 实验并存库
+            import re as _re_combo
+            for _k in [k for k in list(st.session_state.keys()) if _re_combo.match(r"^ne_combo_", str(k))]:
                 st.session_state.pop(_k, None)
-            # （不能只删 key——浏览器 rerun 时会把旧控件值提交回来覆盖删除；
-            #   显式赋值与"填入"机制对称，确定性生效）
-            st.session_state["ne_date"] = date.today()
-            st.session_state["ne_temp"] = str(S.get_setting("DEFAULT_TEMPERATURE") or "")
-            st.session_state["ne_hum"] = str(S.get_setting("DEFAULT_HUMIDITY") or "")
-            st.session_state["ne_cp"] = str(S.get_setting("DEFAULT_COLUMN_PRESSURE") or "")
-            st.session_state["ne_va"] = float(S.get_setting("DEFAULT_VA"))
-            st.session_state["ne_vd"] = float(S.get_setting("DEFAULT_VD"))
-            st.session_state["ne_purpose"] = ""
-            st.session_state["ne_cur_sheets"] = []
-            st.session_state["ne_current_sheets"] = []
-            st.session_state["ne_exp_type"] = list(EXP_TYPES.keys())[0]
-            st.session_state["base_slm"] = []
-            st.session_state["base_sa"] = []
-            st.session_state["base_da"] = []
-            st.session_state["base_aa"] = []
-            st.session_state["base_pd"] = float(S.get_setting("DEFAULT_PH_DONOR"))
-            st.session_state["base_pa"] = float(S.get_setting("DEFAULT_PH_ACCEPTOR"))
-            st.session_state["base_et"] = float(S.get_setting("DEFAULT_EXTRACT_TIME"))
-            st.session_state["base_ev"] = float(S.get_setting("DEFAULT_EXTRACT_VOLTAGE"))
-            st.session_state["base_dc"] = str(S.get_setting("DEFAULT_DONOR_COMPOSITION") or "甲酸")
-            st.session_state["base_dbc"] = str(S.get_setting("DEFAULT_DONOR_BUFFER_CONC") or "")
-            st.session_state["base_dac"] = str(S.get_setting("DEFAULT_DONOR_ADDITIVE_CONC") or "")
-            st.session_state["base_ac"] = str(S.get_setting("DEFAULT_ACCEPTOR_COMPOSITION") or "甲酸")
-            st.session_state["base_abc"] = str(S.get_setting("DEFAULT_ACCEPTOR_BUFFER_CONC") or "")
-            st.session_state["base_aac"] = str(S.get_setting("DEFAULT_ACCEPTOR_ADDITIVE_CONC") or "")
-            st.session_state["_ne_gc_autofill"] = None
-            st.session_state.pop(f"ne_qc_override_{sel}", None)  # 该文件夹可能残留的质控名覆盖
-            for _i in range(16):  # 各添加剂含量/浓度输入框（自由单位）一并复位
-                st.session_state.pop(f"base_sa_pct_{_i}", None)
-                st.session_state.pop(f"base_da_pct_{_i}", None)
-                st.session_state.pop(f"base_aa_pct_{_i}", None)
-        if _erow:
-            st.session_state["ne_date"] = (datetime.strptime(_erow["exp_date"], "%Y%m%d").date()
-                                           if _erow["exp_date"] else date.today())
-            st.session_state["ne_temp_key"] = _erow["temperature"] or ""
-            st.session_state["ne_temp"] = _erow["temperature"] or ""
-            st.session_state["ne_hum"] = _erow["humidity"] or ""
-            st.session_state["ne_cp"] = _erow["column_pressure"] or ""
-            if _erow["Va"]:
-                st.session_state["ne_va"] = float(_erow["Va"])
-            if _erow["Vd"]:
-                st.session_state["ne_vd"] = float(_erow["Vd"])
-            st.session_state["ne_purpose"] = _erow["purpose"] or ""
-            if _erow["current_sheets"]:
+            if _erow is None:
+                # 切到未录入过的文件夹：把表单控件显式写回默认值。
+                st.session_state["ne_sample_fmt"] = "跟随全局设置"
+                st.session_state.pop("ne_sample_fmt_re", None)
+                st.session_state["ne_multi_qc"] = False
+                st.session_state.pop("ne_qc_combos", None)
+                st.session_state.pop("_ne_quick_state", None)
+                st.session_state.pop("_ne_detail_state", None)
+                st.session_state.pop("_ne_last_group_mode", None)
+                import re as _re_sync
+                for _k in [k for k in list(st.session_state.keys())
+                           if _re_sync.match(r"^g\d+_(ov_|label$|well$|abw$|note$|tags$|qc_combo$|slm_main$|pH_donor$|pH_acceptor$|extract_time$|extract_voltage$|donor_composition$|donor_buffer_conc$|acceptor_composition$|acceptor_buffer_conc$|donor_additives$|acceptor_additives$|slm_additives$|.*_pct_)", k)]:
+                    st.session_state.pop(_k, None)
+                # （不能只删 key——浏览器 rerun 时会把旧控件值提交回来覆盖删除；
+                #   显式赋值与"填入"机制对称，确定性生效）
+                st.session_state["ne_date"] = date.today()
+                st.session_state["ne_temp"] = str(S.get_setting("DEFAULT_TEMPERATURE") or "")
+                st.session_state["ne_hum"] = str(S.get_setting("DEFAULT_HUMIDITY") or "")
+                st.session_state["ne_cp"] = str(S.get_setting("DEFAULT_COLUMN_PRESSURE") or "")
+                st.session_state["ne_va"] = float(S.get_setting("DEFAULT_VA"))
+                st.session_state["ne_vd"] = float(S.get_setting("DEFAULT_VD"))
+                st.session_state["ne_purpose"] = ""
+                st.session_state["ne_cur_sheets"] = []
+                st.session_state["ne_current_sheets"] = []
+                st.session_state["ne_exp_type"] = list(EXP_TYPES.keys())[0]
+                st.session_state["base_slm"] = []
+                st.session_state["base_sa"] = []
+                st.session_state["base_da"] = []
+                st.session_state["base_aa"] = []
+                st.session_state["base_pd"] = float(S.get_setting("DEFAULT_PH_DONOR"))
+                st.session_state["base_pa"] = float(S.get_setting("DEFAULT_PH_ACCEPTOR"))
+                st.session_state["base_et"] = float(S.get_setting("DEFAULT_EXTRACT_TIME"))
+                st.session_state["base_ev"] = float(S.get_setting("DEFAULT_EXTRACT_VOLTAGE"))
+                st.session_state["base_dc"] = str(S.get_setting("DEFAULT_DONOR_COMPOSITION") or "甲酸")
+                st.session_state["base_dbc"] = str(S.get_setting("DEFAULT_DONOR_BUFFER_CONC") or "")
+                st.session_state["base_dac"] = str(S.get_setting("DEFAULT_DONOR_ADDITIVE_CONC") or "")
+                st.session_state["base_ac"] = str(S.get_setting("DEFAULT_ACCEPTOR_COMPOSITION") or "甲酸")
+                st.session_state["base_abc"] = str(S.get_setting("DEFAULT_ACCEPTOR_BUFFER_CONC") or "")
+                st.session_state["base_aac"] = str(S.get_setting("DEFAULT_ACCEPTOR_ADDITIVE_CONC") or "")
+                st.session_state["_ne_gc_autofill"] = None
+                st.session_state.pop(f"ne_qc_override_{sel}", None)  # 该文件夹可能残留的质控名覆盖
+                for _i in range(16):  # 各添加剂含量/浓度输入框（自由单位）一并复位
+                    st.session_state.pop(f"base_sa_pct_{_i}", None)
+                    st.session_state.pop(f"base_da_pct_{_i}", None)
+                    st.session_state.pop(f"base_aa_pct_{_i}", None)
+            if _erow:
+                st.session_state["ne_date"] = (datetime.strptime(_erow["exp_date"], "%Y%m%d").date()
+                                               if _erow["exp_date"] else date.today())
+                st.session_state["ne_temp_key"] = _erow["temperature"] or ""
+                st.session_state["ne_temp"] = _erow["temperature"] or ""
+                st.session_state["ne_hum"] = _erow["humidity"] or ""
+                st.session_state["ne_cp"] = _erow["column_pressure"] or ""
+                if _erow["Va"]:
+                    st.session_state["ne_va"] = float(_erow["Va"])
+                if _erow["Vd"]:
+                    st.session_state["ne_vd"] = float(_erow["Vd"])
+                st.session_state["ne_purpose"] = _erow["purpose"] or ""
+                if _erow["current_sheets"]:
+                    try:
+                        st.session_state["ne_cur_sheets"] = [
+                            f"{m['file']} :: {m['sheet']}" for m in json.loads(_erow["current_sheets"])]
+                    except Exception:
+                        pass
+                # 实验目的分类回填（selectbox 需带 key；此处在其实例化之前）
+                _et_rev = {v["key"]: k for k, v in EXP_TYPES.items()}
+                if _erow["exp_type"] in _et_rev:
+                    st.session_state["ne_exp_type"] = _et_rev[_erow["exp_type"]]
+                # 多标准品组合回填
                 try:
-                    st.session_state["ne_cur_sheets"] = [
-                        f"{m['file']} :: {m['sheet']}" for m in json.loads(_erow["current_sheets"])]
+                    _qc_combos_saved = json.loads(_erow["qc_combos"]) if _erow["qc_combos"] else []
+                except Exception:
+                    _qc_combos_saved = []
+                st.session_state["ne_multi_qc"] = bool(_qc_combos_saved)
+                if _qc_combos_saved:
+                    st.session_state["ne_qc_combos"] = _qc_combos_saved
+                # 各组已保存的组合名 → 详细模式下拉预选（键在控件实例化前写入）
+                try:
+                    _gc_qc_df = M.get_group_conditions(conn_ne, int(_erow["id"]))
+                    if len(_gc_qc_df):
+                        for _, _r_qc in _gc_qc_df[_gc_qc_df["grp"] > 0].iterrows():
+                            _cn_qc = _r_qc.get("qc_combo")
+                            if _cn_qc:
+                                st.session_state[f"g{int(_r_qc['grp'])}_qc_combo"] = str(_cn_qc)
                 except Exception:
                     pass
-            # 实验目的分类回填（selectbox 需带 key；此处在其实例化之前）
-            _et_rev = {v["key"]: k for k, v in EXP_TYPES.items()}
-            if _erow["exp_type"] in _et_rev:
-                st.session_state["ne_exp_type"] = _et_rev[_erow["exp_type"]]
-            # 多标准品组合回填
-            try:
-                _qc_combos_saved = json.loads(_erow["qc_combos"]) if _erow["qc_combos"] else []
-            except Exception:
-                _qc_combos_saved = []
-            st.session_state["ne_multi_qc"] = bool(_qc_combos_saved)
-            if _qc_combos_saved:
-                st.session_state["ne_qc_combos"] = _qc_combos_saved
-            # 各组已保存的组合名 → 详细模式下拉预选（键在控件实例化前写入）
-            try:
-                _gc_qc_df = M.get_group_conditions(conn_ne, int(_erow["id"]))
-                if len(_gc_qc_df):
-                    for _, _r_qc in _gc_qc_df[_gc_qc_df["grp"] > 0].iterrows():
-                        _cn_qc = _r_qc.get("qc_combo")
-                        if _cn_qc:
-                            st.session_state[f"g{int(_r_qc['grp'])}_qc_combo"] = str(_cn_qc)
-            except Exception:
-                pass
-            # 样品名称格式回填（该实验保存过的格式；否则跟随全局）
-            _sf_saved = _erow["sample_format"] if "sample_format" in _erow.keys() else None
-            if _sf_saved:
-                st.session_state["ne_sample_fmt"] = next(
-                    (_k for _k, _rx in S.SAMPLE_FORMAT_PRESETS.items() if _rx == _sf_saved),
-                    "自定义正则")
-            else:
-                st.session_state["ne_sample_fmt"] = "跟随全局设置"
-            # 组级条件（基准/各组覆盖/逐组多选）在解析后回填 → 置待办标记
-            st.session_state["_ne_autofill_pending"] = True
-            st.session_state["_ne_autofill_show_msg"] = True
+                # 样品名称格式回填（该实验保存过的格式；否则跟随全局）
+                _sf_saved = _erow["sample_format"] if "sample_format" in _erow.keys() else None
+                if _sf_saved:
+                    st.session_state["ne_sample_fmt"] = next(
+                        (_k for _k, _rx in S.SAMPLE_FORMAT_PRESETS.items() if _rx == _sf_saved),
+                        "自定义正则")
+                else:
+                    st.session_state["ne_sample_fmt"] = "跟随全局设置"
+                # 组级条件（基准/各组覆盖/逐组多选）在解析后回填 → 置待办标记
+                st.session_state["_ne_autofill_pending"] = True
+                st.session_state["_ne_autofill_show_msg"] = True
 
-    # 删除传错数据的实验文件夹（两步确认防误删）
-    with st.expander("🗑 删除该实验文件夹（数据传错时用）"):
-        st.warning(f"将永久删除 `{folder}` 及其中的全部文件，且不可恢复（数据库记录不受影响）。")
-        confirm_del = st.checkbox("我确认要删除该文件夹", key="ne_del_confirm")
-        if confirm_del and st.button("🗑 确认删除", type="primary", key="ne_del_btn"):
-            import shutil
-            shutil.rmtree(folder, ignore_errors=True)
-            st.session_state["_flash_msg"] = f"已删除文件夹 `{sel}`。"
-            st.session_state.pop(f"ne_qc_override_{sel}", None)
-            st.session_state.pop("_std_check_eid", None)
-            st.session_state.pop("_std_check_folder", None)
-            st.session_state.get("_excl_res_cache", {}).pop(sel, None)
-            st.session_state.get("_excl_res_cache_sig", {}).pop(sel, None)
-            st.session_state.get("_width_res_cache", {}).pop(sel, None)
-            st.rerun()
+        # 删除传错数据的实验文件夹（两步确认防误删）
+        with st.expander("🗑 删除该实验文件夹（数据传错时用）"):
+            st.warning(f"将永久删除 `{folder}` 及其中的全部文件，且不可恢复（数据库记录不受影响）。")
+            confirm_del = st.checkbox("我确认要删除该文件夹", key="ne_del_confirm")
+            if confirm_del and st.button("🗑 确认删除", type="primary", key="ne_del_btn"):
+                import shutil
+                shutil.rmtree(folder, ignore_errors=True)
+                st.session_state["_flash_msg"] = f"已删除文件夹 `{sel}`。"
+                st.session_state.pop(f"ne_qc_override_{sel}", None)
+                st.session_state.pop("_std_check_eid", None)
+                st.session_state.pop("_std_check_folder", None)
+                st.session_state.get("_excl_res_cache", {}).pop(sel, None)
+                st.session_state.get("_excl_res_cache_sig", {}).pop(sel, None)
+                st.session_state.get("_width_res_cache", {}).pop(sel, None)
+                st.rerun()
 
-    # 用户点过「应用质控名重新解析」后，该文件夹的质控名覆盖会存到这里，
-    # 之后每次解析（含缓存命中）都按它来，避免重解析被下一次 rerun 覆盖回去
-    _qc_override = st.session_state.get(f"ne_qc_override_{sel}")
-    # 多组合模式下，编辑器内容变化即并入解析覆盖（不用等按钮）
-    _ne_multi_now = st.session_state.get("ne_multi_qc")
-    if _ne_multi_now and st.session_state.get("ne_qc_combos"):
-        _qc_override = _combos_union_qc(st.session_state["ne_qc_combos"])
+        # 用户点过「应用质控名重新解析」后，该文件夹的质控名覆盖会存到这里，
+        # 之后每次解析（含缓存命中）都按它来，避免重解析被下一次 rerun 覆盖回去
+        _qc_override = st.session_state.get(f"ne_qc_override_{sel}")
+        # 多组合模式下，编辑器内容变化即并入解析覆盖（不用等按钮）
+        _ne_multi_now = st.session_state.get("ne_multi_qc")
+        if _ne_multi_now and st.session_state.get("ne_qc_combos"):
+            _qc_override = _combos_union_qc(st.session_state["ne_qc_combos"])
 
-    # —— 样品名称格式（本实验解析用；默认跟随全局设置，已录入实验默认其保存格式）——
-    _sf_row = None
-    try:
-        _sf_row = get_db().execute("SELECT sample_format FROM experiments WHERE folder=?", (sel,)).fetchone()
-    except Exception:
+        # —— 样品名称格式（本实验解析用；默认跟随全局设置，已录入实验默认其保存格式）——
         _sf_row = None
-    _saved_fmt = (_sf_row["sample_format"] if _sf_row else None) or None
-    _preset_items = list(S.SAMPLE_FORMAT_PRESETS.items())
-    _fmt_labels = ["跟随全局设置"] + [k for k, _ in _preset_items] + ["自定义正则"]
-    if _saved_fmt:
-        _def_label = next((k for k, rx in _preset_items if rx == _saved_fmt), "自定义正则")
-    else:
-        _def_label = "跟随全局设置"
-    _fc = st.columns([2, 2])
-    def _sync_fmt_example():
-        # 格式切换时联动更新预览示例（否则预览框还停留在上一个格式的示例名）
-        st.session_state["ne_sample_fmt_test"] = _sample_example_for(
-            st.session_state.get("ne_sample_fmt", ""))
-    _fmt_label = _fc[0].selectbox("样品名称格式（本实验解析用）", _fmt_labels,
-                                  index=_fmt_labels.index(_def_label), key="ne_sample_fmt",
-                                  on_change=_sync_fmt_example)
-    if _fmt_label == "自定义正则":
-        _eff_fmt = _fc[1].text_input("自定义正则（g=组号 ph=相位 r=重复号）",
-                                     value=_saved_fmt or S.get_sample_format(),
-                                     key="ne_sample_fmt_re").strip() or None
-    else:
-        _eff_fmt = dict(_preset_items).get(_fmt_label)
-    if "ne_sample_fmt_test" not in st.session_state:
-        st.session_state["ne_sample_fmt_test"] = _sample_example_for(_fmt_label)
-    _fmt_test = _fc[1].text_input("样品名解析预览", key="ne_sample_fmt_test")
-    try:
-        _pp_prev = P.parse_sample_name(_fmt_test, pattern=_eff_fmt) if _eff_fmt else P.parse_sample_name(_fmt_test)
-        if _pp_prev:
-            st.caption(f"「{_fmt_test}」→ 组{_pp_prev[0]} / {'受体相' if _pp_prev[1] == 'A' else '供体相'} / 重复{_pp_prev[2]}"
-                       + ("（其余名称将作为质控/空白候选）" if _eff_fmt is None else ""))
-        else:
-            st.caption(f"⚠️「{_fmt_test}」不符合当前格式——将被当作质控/空白候选，请检查格式或预览名。")
-    except Exception as _fe:
-        st.caption(f"⚠️ 正则无效：{_fe}（将按默认格式解析）")
-        _eff_fmt = None
-
-    with st.spinner("解析数据中…"):
         try:
-            res = _cached_parse(sel, json.dumps(_qc_override, ensure_ascii=False) if _qc_override else "",
-                                _eff_fmt or "",
-                                _folder_sig(sel))
-        except Exception as e:
-            st.error(f"解析失败：{e}"); return
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("物质数", len(res.analytes))
-    c2.metric("样品组数", len(res.groups))
-    c3.metric("重复数", res.n_replicates)
-    c4.metric("数据行数", len(res.df))
-    if res.warnings:
-        with st.expander(f"⚠️ 解析警告（{len(res.warnings)} 条）"):
-            for w in res.warnings[:20]:
-                st.write("• " + w)
-    st.session_state["cur_res"] = res
+            _sf_row = get_db().execute("SELECT sample_format FROM experiments WHERE folder=?", (sel,)).fetchone()
+        except Exception:
+            _sf_row = None
+        _saved_fmt = (_sf_row["sample_format"] if _sf_row else None) or None
+        _preset_items = list(S.SAMPLE_FORMAT_PRESETS.items())
+        _fmt_labels = ["跟随全局设置"] + [k for k, _ in _preset_items] + ["自定义正则"]
+        if _saved_fmt:
+            _def_label = next((k for k, rx in _preset_items if rx == _saved_fmt), "自定义正则")
+        else:
+            _def_label = "跟随全局设置"
+        _fc = st.columns([2, 2])
+        def _sync_fmt_example():
+            # 格式切换时联动更新预览示例（否则预览框还停留在上一个格式的示例名）
+            st.session_state["ne_sample_fmt_test"] = _sample_example_for(
+                st.session_state.get("ne_sample_fmt", ""))
+        _fmt_label = _fc[0].selectbox("样品名称格式（本实验解析用）", _fmt_labels,
+                                      index=_fmt_labels.index(_def_label), key="ne_sample_fmt",
+                                      on_change=_sync_fmt_example)
+        if _fmt_label == "自定义正则":
+            _eff_fmt = _fc[1].text_input("自定义正则（g=组号 ph=相位 r=重复号）",
+                                         value=_saved_fmt or S.get_sample_format(),
+                                         key="ne_sample_fmt_re").strip() or None
+        else:
+            _eff_fmt = dict(_preset_items).get(_fmt_label)
+        if "ne_sample_fmt_test" not in st.session_state:
+            st.session_state["ne_sample_fmt_test"] = _sample_example_for(_fmt_label)
+        _fmt_test = _fc[1].text_input("样品名解析预览", key="ne_sample_fmt_test")
+        try:
+            _pp_prev = P.parse_sample_name(_fmt_test, pattern=_eff_fmt) if _eff_fmt else P.parse_sample_name(_fmt_test)
+            if _pp_prev:
+                st.caption(f"「{_fmt_test}」→ 组{_pp_prev[0]} / {'受体相' if _pp_prev[1] == 'A' else '供体相'} / 重复{_pp_prev[2]}"
+                           + ("（其余名称将作为质控/空白候选）" if _eff_fmt is None else ""))
+            else:
+                st.caption(f"⚠️「{_fmt_test}」不符合当前格式——将被当作质控/空白候选，请检查格式或预览名。")
+        except Exception as _fe:
+            st.caption(f"⚠️ 正则无效：{_fe}（将按默认格式解析）")
+            _eff_fmt = None
 
-    # ---- QC（默认值从用户设置读取）----
-    st.subheader("2) 质控样 / 空白样名称")
-    st.caption("下拉框列出数据文件中的**全部样品名**（⭐/☆ 只是自动推荐标记，任何样品——包括洗针液等——都可选为标准品/空白）；"
-               "默认选中自动识别结果，可在下拉中改选。")
+        with st.spinner("解析数据中…"):
+            try:
+                res = _cached_parse(sel, json.dumps(_qc_override, ensure_ascii=False) if _qc_override else "",
+                                    _eff_fmt or "",
+                                    _folder_sig(sel))
+            except Exception as e:
+                st.error(f"解析失败：{e}"); return
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("物质数", len(res.analytes))
+        c2.metric("样品组数", len(res.groups))
+        c3.metric("重复数", res.n_replicates)
+        c4.metric("数据行数", len(res.df))
+        if res.warnings:
+            with st.expander(f"⚠️ 解析警告（{len(res.warnings)} 条）"):
+                for w in res.warnings[:20]:
+                    st.write("• " + w)
+        st.session_state["cur_res"] = res
 
-    def _qc_candidates(samples):
-        """把数据中疑似标准品/空白的样本排前（供下拉优先展示）"""
-        def rank(s):
+        # ---- QC（默认值从用户设置读取）----
+    with st.expander("2) 质控样 / 空白样名称", expanded=(st.session_state.get("ne_step") == "2 质控样")):
+        st.caption("下拉框列出数据文件中的**全部样品名**（⭐/☆ 只是自动推荐标记，任何样品——包括洗针液等——都可选为标准品/空白）；"
+                   "默认选中自动识别结果，可在下拉中改选。")
+
+        def _qc_candidates(samples):
+            """把数据中疑似标准品/空白的样本排前（供下拉优先展示）"""
+            def rank(s):
+                sl = s.lower()
+                if "std" in sl or "standard" in sl or "标准" in s:
+                    return 0
+                if "blank" in sl or "blk" in sl or "空白" in s:
+                    return 1
+                return 2
+            return sorted(samples, key=rank)
+
+        cc = st.columns(4)
+        # 选项 = 文件中出现的全部样品名（含洗针/其他命名，不排除任何样品）；
+        # ⭐自动推荐只决定排序和默认值，不影响可选范围
+        _raw_names = list(getattr(res, "all_sample_names", []) or [])
+        if not _raw_names:
+            _raw_names = res.df["sample"].unique().tolist()
+        all_samples = _qc_candidates(sorted(_raw_names))
+        def _fmt_sample(s):
             sl = s.lower()
             if "std" in sl or "standard" in sl or "标准" in s:
-                return 0
+                return f"⭐ {s}"
             if "blank" in sl or "blk" in sl or "空白" in s:
-                return 1
-            return 2
-        return sorted(samples, key=rank)
+                return f"☆ {s}"
+            return s
+        def _sel(label, default, key):
+            idx = all_samples.index(default) if default in all_samples else 0
+            return cc[["受体标准品", "供体标准品", "受体空白", "供体空白"].index(label)].selectbox(
+                label, options=all_samples, index=idx, key=key, format_func=_fmt_sample)
+        # 下拉默认值优先用解析时自动识别的名称（宽松 STD/BLK 匹配），其次用户设置
+        qc_names = {
+            "std_acceptor": _sel("受体标准品", res.qc_names.get("std_acceptor") or S.get_setting("DEFAULT_STD_ACCEPTOR"), "qa"),
+            "std_donor":    _sel("供体标准品", res.qc_names.get("std_donor") or S.get_setting("DEFAULT_STD_DONOR"), "qd"),
+            "blk_acceptor": _sel("受体空白", res.qc_names.get("blk_acceptor") or S.get_setting("DEFAULT_BLK_ACCEPTOR"), "ba"),
+            "blk_donor":    _sel("供体空白", res.qc_names.get("blk_donor") or S.get_setting("DEFAULT_BLK_DONOR"), "bd"),
+        }
+        # —— 多标准品组合：不同实验组使用不同的供受体相标准品/空白 ——
+        _multi_qc = st.checkbox("实验组使用不同的供受体相质控样（多标准品组合）", key="ne_multi_qc",
+                                help="勾选后可定义多套标准品/空白组合并命名；"
+                                     "在「4) 萃取条件 → 逐组详细设置」中为每组选择组合，"
+                                     "该组的回收率/转移率将基于所选组合计算。")
+        qc_combos = []
+        if _multi_qc:
+            if "ne_qc_combos" not in st.session_state:
+                st.session_state["ne_qc_combos"] = [{"name": "默认组合", **qc_names}]
+            st.markdown("**标准品组合定义**（每组在下方第 4 步中选择使用哪套组合）")
+            qc_combos = _render_qc_combo_editor(all_samples, st.session_state["ne_qc_combos"], "ne")
+            st.session_state["ne_qc_combos"] = qc_combos
+            # 组合/下拉变化 → 解析覆盖自动同步（下一轮解析保留全部标准品行）
+            if _combos_union_qc(qc_combos) != _qc_override:
+                st.session_state[f"ne_qc_override_{sel}"] = _combos_union_qc(qc_combos)
+                st.rerun()
 
-    cc = st.columns(4)
-    # 选项 = 文件中出现的全部样品名（含洗针/其他命名，不排除任何样品）；
-    # ⭐自动推荐只决定排序和默认值，不影响可选范围
-    _raw_names = list(getattr(res, "all_sample_names", []) or [])
-    if not _raw_names:
-        _raw_names = res.df["sample"].unique().tolist()
-    all_samples = _qc_candidates(sorted(_raw_names))
-    def _fmt_sample(s):
-        sl = s.lower()
-        if "std" in sl or "standard" in sl or "标准" in s:
-            return f"⭐ {s}"
-        if "blank" in sl or "blk" in sl or "空白" in s:
-            return f"☆ {s}"
-        return s
-    def _sel(label, default, key):
-        idx = all_samples.index(default) if default in all_samples else 0
-        return cc[["受体标准品", "供体标准品", "受体空白", "供体空白"].index(label)].selectbox(
-            label, options=all_samples, index=idx, key=key, format_func=_fmt_sample)
-    # 下拉默认值优先用解析时自动识别的名称（宽松 STD/BLK 匹配），其次用户设置
-    qc_names = {
-        "std_acceptor": _sel("受体标准品", res.qc_names.get("std_acceptor") or S.get_setting("DEFAULT_STD_ACCEPTOR"), "qa"),
-        "std_donor":    _sel("供体标准品", res.qc_names.get("std_donor") or S.get_setting("DEFAULT_STD_DONOR"), "qd"),
-        "blk_acceptor": _sel("受体空白", res.qc_names.get("blk_acceptor") or S.get_setting("DEFAULT_BLK_ACCEPTOR"), "ba"),
-        "blk_donor":    _sel("供体空白", res.qc_names.get("blk_donor") or S.get_setting("DEFAULT_BLK_DONOR"), "bd"),
-    }
-    # —— 多标准品组合：不同实验组使用不同的供受体相标准品/空白 ——
-    _multi_qc = st.checkbox("实验组使用不同的供受体相质控样（多标准品组合）", key="ne_multi_qc",
-                            help="勾选后可定义多套标准品/空白组合并命名；"
-                                 "在「4) 萃取条件 → 逐组详细设置」中为每组选择组合，"
-                                 "该组的回收率/转移率将基于所选组合计算。")
-    qc_combos = []
-    if _multi_qc:
-        if "ne_qc_combos" not in st.session_state:
-            st.session_state["ne_qc_combos"] = [{"name": "默认组合", **qc_names}]
-        st.markdown("**标准品组合定义**（每组在下方第 4 步中选择使用哪套组合）")
-        qc_combos = _render_qc_combo_editor(all_samples, st.session_state["ne_qc_combos"], "ne")
-        st.session_state["ne_qc_combos"] = qc_combos
-        # 组合/下拉变化 → 解析覆盖自动同步（下一轮解析保留全部标准品行）
-        if _combos_union_qc(qc_combos) != _qc_override:
-            st.session_state[f"ne_qc_override_{sel}"] = _combos_union_qc(qc_combos)
+        # 解析用质控名：多组合模式用各角色名字的并集（解析器保留全部标准品行），
+        # 单模式用下拉选择值；两者都会存入 session 覆盖，避免 rerun 丢失
+        _qc_for_parse = (_combos_union_qc(qc_combos) if _multi_qc and qc_combos else dict(qc_names))
+        if st.button("🔄 应用质控名重新解析"):
+            st.session_state[f"ne_qc_override_{sel}"] = _qc_for_parse
             st.rerun()
 
-    # 解析用质控名：多组合模式用各角色名字的并集（解析器保留全部标准品行），
-    # 单模式用下拉选择值；两者都会存入 session 覆盖，避免 rerun 丢失
-    _qc_for_parse = (_combos_union_qc(qc_combos) if _multi_qc and qc_combos else dict(qc_names))
-    if st.button("🔄 应用质控名重新解析"):
-        st.session_state[f"ne_qc_override_{sel}"] = _qc_for_parse
-        st.rerun()
+        # ---- 元数据（日期用日历）----
+    with st.expander("3) 实验元数据", expanded=(st.session_state.get("ne_step") == "3 元数据")):
+        mc = st.columns(4)
+        meta = {}
+        # 日历选择日期
+        m = re.match(r"^(\d{4})(\d{2})(\d{2})", sel)
+        default_d = date(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else date.today()
+        picked = mc[0].date_input("实验日期", value=default_d, key="ne_date")
+        meta["exp_date"] = picked.strftime("%Y%m%d")
+        meta["temperature"] = mc[1].text_input("温度(℃)", value=str(S.get_setting("DEFAULT_TEMPERATURE") or ""), key="ne_temp")
+        meta["humidity"] = mc[2].text_input("湿度(%)", value=str(S.get_setting("DEFAULT_HUMIDITY") or ""), key="ne_hum")
+        meta["column_pressure"] = mc[3].text_input("液相平衡柱压", value=str(S.get_setting("DEFAULT_COLUMN_PRESSURE") or ""), key="ne_cp")
+        mc2 = st.columns(2)
+        meta["Va"] = mc2[0].number_input("受体相体积 Va (μL)", value=float(S.get_setting("DEFAULT_VA")), key="ne_va")
+        meta["Vd"] = mc2[1].number_input("供体相体积 Vd (μL)", value=float(S.get_setting("DEFAULT_VD")), key="ne_vd")
+        meta["use_sample"] = 1 if st.checkbox("使用样品（启用供体相，计算转移率）", value=True) else 0
+        meta["purpose"] = st.text_area("实验说明", value="", key="ne_purpose")
 
-    # ---- 元数据（日期用日历）----
-    st.subheader("3) 实验元数据")
-    mc = st.columns(4)
-    meta = {}
-    # 日历选择日期
-    m = re.match(r"^(\d{4})(\d{2})(\d{2})", sel)
-    default_d = date(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else date.today()
-    picked = mc[0].date_input("实验日期", value=default_d, key="ne_date")
-    meta["exp_date"] = picked.strftime("%Y%m%d")
-    meta["temperature"] = mc[1].text_input("温度(℃)", value=str(S.get_setting("DEFAULT_TEMPERATURE") or ""), key="ne_temp")
-    meta["humidity"] = mc[2].text_input("湿度(%)", value=str(S.get_setting("DEFAULT_HUMIDITY") or ""), key="ne_hum")
-    meta["column_pressure"] = mc[3].text_input("液相平衡柱压", value=str(S.get_setting("DEFAULT_COLUMN_PRESSURE") or ""), key="ne_cp")
-    mc2 = st.columns(2)
-    meta["Va"] = mc2[0].number_input("受体相体积 Va (μL)", value=float(S.get_setting("DEFAULT_VA")), key="ne_va")
-    meta["Vd"] = mc2[1].number_input("供体相体积 Vd (μL)", value=float(S.get_setting("DEFAULT_VD")), key="ne_vd")
-    meta["use_sample"] = 1 if st.checkbox("使用样品（启用供体相，计算转移率）", value=True) else 0
-    meta["purpose"] = st.text_area("实验说明", value="", key="ne_purpose")
+        # ---- 电流记录关联 ----
+    with st.expander("3.5) 电流记录关联（可选）", expanded=(st.session_state.get("ne_step") == "3.5 电流记录")):
+        st.caption("从 `data/current/` 的 xlsx 中选择本次实验对应的电流 sheet（可多选，如测试萃取时间时多个 sheet）；"
+                   "也可以直接上传新的电流 xlsx。不选择则按命名规则自动匹配（sheet名=文件夹名）。")
+        # 上传新电流 xlsx
+        cur_up = st.file_uploader("上传电流 xlsx（保存到 data/current/）", type=["xlsx"], key="ne_cur_upload")
+        if cur_up:
+            if st.button("💾 保存上传的电流文件", key="ne_cur_save"):
+                CUR.CURRENT_DIR.mkdir(parents=True, exist_ok=True)
+                (CUR.CURRENT_DIR / cur_up.name).write_bytes(cur_up.getvalue())
+                st.success(f"已保存 `{cur_up.name}` 到 data/current/")
+                st.rerun()
+        # 扫描现有 sheet 供选择
+        cur_sheet_list = CUR.list_all_sheets_detailed()
+        if cur_sheet_list:
+            _opts = [f"{d['file']} :: {d['sheet']}" for d in cur_sheet_list]
+            sel_sheets = st.multiselect("选择本次实验的电流 sheet（可多选）", _opts, key="ne_cur_sheets")
+            st.session_state["ne_current_sheets"] = [
+                {"file": s.split(" :: ")[0], "sheet": s.split(" :: ", 1)[1]} for s in sel_sheets]
+            if sel_sheets:
+                st.caption(f"已选 {len(sel_sheets)} 个 sheet，将随实验一起保存，实验详情页的电流曲线优先使用。")
+        else:
+            st.info("`data/current/` 文件夹为空或不存在。可上传 xlsx，或之后把电流文件放进去。")
+            st.session_state["ne_current_sheets"] = []
 
-    # ---- 电流记录关联 ----
-    st.subheader("3.5) 电流记录关联（可选）")
-    st.caption("从 `data/current/` 的 xlsx 中选择本次实验对应的电流 sheet（可多选，如测试萃取时间时多个 sheet）；"
-               "也可以直接上传新的电流 xlsx。不选择则按命名规则自动匹配（sheet名=文件夹名）。")
-    # 上传新电流 xlsx
-    cur_up = st.file_uploader("上传电流 xlsx（保存到 data/current/）", type=["xlsx"], key="ne_cur_upload")
-    if cur_up:
-        if st.button("💾 保存上传的电流文件", key="ne_cur_save"):
-            CUR.CURRENT_DIR.mkdir(parents=True, exist_ok=True)
-            (CUR.CURRENT_DIR / cur_up.name).write_bytes(cur_up.getvalue())
-            st.success(f"已保存 `{cur_up.name}` 到 data/current/")
-            st.rerun()
-    # 扫描现有 sheet 供选择
-    cur_sheet_list = CUR.list_all_sheets_detailed()
-    if cur_sheet_list:
-        _opts = [f"{d['file']} :: {d['sheet']}" for d in cur_sheet_list]
-        sel_sheets = st.multiselect("选择本次实验的电流 sheet（可多选）", _opts, key="ne_cur_sheets")
-        st.session_state["ne_current_sheets"] = [
-            {"file": s.split(" :: ")[0], "sheet": s.split(" :: ", 1)[1]} for s in sel_sheets]
-        if sel_sheets:
-            st.caption(f"已选 {len(sel_sheets)} 个 sheet，将随实验一起保存，实验详情页的电流曲线优先使用。")
-    else:
-        st.info("`data/current/` 文件夹为空或不存在。可上传 xlsx，或之后把电流文件放进去。")
-        st.session_state["ne_current_sheets"] = []
+        # ---- 组级萃取条件 ----
+        if not res.groups:
+            st.warning("⚠️ 当前样品名称格式下没有识别到任何样品组（所有名称都被当作质控/空白候选）。"
+                       "请检查上方「样品名称格式」是否与数据的命名方式一致。")
+            return
+    with st.expander("4) 萃取条件（基准 + 各组覆盖）", expanded=(st.session_state.get("ne_step") == "4 萃取条件")):
+        st.caption("💡 先填一组**基准条件**；各组里**勾选「覆盖」**才会修改该字段，不勾选则继承基准。")
 
-    # ---- 组级萃取条件 ----
-    if not res.groups:
-        st.warning("⚠️ 当前样品名称格式下没有识别到任何样品组（所有名称都被当作质控/空白候选）。"
-                   "请检查上方「样品名称格式」是否与数据的命名方式一致。")
-        return
-    st.subheader("4) 萃取条件（基准 + 各组覆盖）")
-    st.caption("💡 先填一组**基准条件**；各组里**勾选「覆盖」**才会修改该字段，不勾选则继承基准。")
+        exp_type_label = st.selectbox("实验目的分类", list(EXP_TYPES.keys()), key="ne_exp_type")
+        exp_type = EXP_TYPES[exp_type_label]
+        st.info(f"📋 {exp_type['hint']}")
 
-    exp_type_label = st.selectbox("实验目的分类", list(EXP_TYPES.keys()), key="ne_exp_type")
-    exp_type = EXP_TYPES[exp_type_label]
-    st.info(f"📋 {exp_type['hint']}")
+        slm_main_opts, slm_add_opts = ["（无）"], []
+        phase_add_opts = []  # 添加剂选项 = SLM表全部物质（主SLM各表+添加剂各表，三处添加剂共用）
+        all_reagent_opts = []  # 试剂数据库全名单（主SLM+添加剂，供成分下拉）
+        if REF_OK:
+            lib = R.get_slm_library()
+            slm_main_opts = ["（无）"] + lib.get("main_names", [])
+            phase_add_opts = sorted(set(lib.get("main_names", []) + lib.get("additive_names", [])))
+            slm_add_opts = list(phase_add_opts)  # SLM膜中添加剂同样可选全部物质
+            all_reagent_opts = phase_add_opts
+        # 自定义试剂标签：用户曾自由输入、且尚未出现在试剂表中的名称 → 并入各下拉，
+        # 显示时带 🔧 标识（存库值仍是裸名）；与试剂表重名的自动"转正"（不再带标识）
+        _lib_all_set = set(all_reagent_opts)
+        _custom_set = {n for n in S.get_custom_reagents() if n not in _lib_all_set}
+        if _custom_set:
+            slm_main_opts = slm_main_opts + sorted(_custom_set - set(slm_main_opts))
+            phase_add_opts = sorted(set(phase_add_opts) | _custom_set)
+            slm_add_opts = list(phase_add_opts)
+            all_reagent_opts = sorted(set(all_reagent_opts) | _custom_set)
 
-    slm_main_opts, slm_add_opts = ["（无）"], []
-    phase_add_opts = []  # 添加剂选项 = SLM表全部物质（主SLM各表+添加剂各表，三处添加剂共用）
-    all_reagent_opts = []  # 试剂数据库全名单（主SLM+添加剂，供成分下拉）
-    if REF_OK:
-        lib = R.get_slm_library()
-        slm_main_opts = ["（无）"] + lib.get("main_names", [])
-        phase_add_opts = sorted(set(lib.get("main_names", []) + lib.get("additive_names", [])))
-        slm_add_opts = list(phase_add_opts)  # SLM膜中添加剂同样可选全部物质
-        all_reagent_opts = phase_add_opts
-    # 自定义试剂标签：用户曾自由输入、且尚未出现在试剂表中的名称 → 并入各下拉，
-    # 显示时带 🔧 标识（存库值仍是裸名）；与试剂表重名的自动"转正"（不再带标识）
-    _lib_all_set = set(all_reagent_opts)
-    _custom_set = {n for n in S.get_custom_reagents() if n not in _lib_all_set}
-    if _custom_set:
-        slm_main_opts = slm_main_opts + sorted(_custom_set - set(slm_main_opts))
-        phase_add_opts = sorted(set(phase_add_opts) | _custom_set)
-        slm_add_opts = list(phase_add_opts)
-        all_reagent_opts = sorted(set(all_reagent_opts) | _custom_set)
+        # —— 自动填入（续）：基准萃取条件 + 各组设置。必须在对应控件实例化之前写 session，
+        #    （控件实例化后再写其 key 会 StreamlitAPIException）；选项过滤防止非法默认值 ——
+        _af_pending = st.session_state.pop("_ne_autofill_pending", False)
+        if st.session_state.pop("_ne_autofill_show_msg", False):
+            st.info("📂 检测到实验已保存的录入信息，表单已自动填入（重新生成时会覆盖保存）。")
+        if _af_pending and _erow is None:
+            st.session_state.pop("_ne_gc_autofill", None)
+        if _af_pending and _erow is not None:
+            try:
+                _gc_ne = M.get_group_conditions(get_db(), int(_erow["id"]))
+            except Exception:
+                _gc_ne = None
+            if _gc_ne is not None and len(_gc_ne):
+                _b_rows = _gc_ne[_gc_ne["grp"] == 0]
+                _b = _b_rows.iloc[0] if len(_b_rows) else {}
+                _grow_ne = _gc_ne[_gc_ne["grp"] > 0]
+                _exp_key_ne = exp_type["key"]
+                _slm_opts_ne = [o for o in slm_main_opts if o != "（无）"]
 
-    # —— 自动填入（续）：基准萃取条件 + 各组设置。必须在对应控件实例化之前写 session，
-    #    （控件实例化后再写其 key 会 StreamlitAPIException）；选项过滤防止非法默认值 ——
-    _af_pending = st.session_state.pop("_ne_autofill_pending", False)
-    if st.session_state.pop("_ne_autofill_show_msg", False):
-        st.info("📂 检测到实验已保存的录入信息，表单已自动填入（重新生成时会覆盖保存）。")
-    if _af_pending and _erow is None:
-        st.session_state.pop("_ne_gc_autofill", None)
-    if _af_pending and _erow is not None:
-        try:
-            _gc_ne = M.get_group_conditions(get_db(), int(_erow["id"]))
-        except Exception:
-            _gc_ne = None
-        if _gc_ne is not None and len(_gc_ne):
-            _b_rows = _gc_ne[_gc_ne["grp"] == 0]
-            _b = _b_rows.iloc[0] if len(_b_rows) else {}
-            _grow_ne = _gc_ne[_gc_ne["grp"] > 0]
-            _exp_key_ne = exp_type["key"]
-            _slm_opts_ne = [o for o in slm_main_opts if o != "（无）"]
-
-            def _jload_ne(v):
-                try:
-                    return json.loads(v) if v else []
-                except Exception:
-                    return []
-
-            def _bare_ne(x):
-                return R._strip_ratio(x)
-
-            def _bget(c):
-                return _b.get(c) if len(_b) else None
-
-            # ---- 基准条件（grp=0）----
-            _slm_opts_ne_set = set(_slm_opts_ne)
-            _ph_opts_set = set(phase_add_opts)
-            st.session_state["base_slm"] = [v for v in
-                                            (_bare_ne(x) for x in str(_bget("slm_main") or "").split("+"))
-                                            if v in _slm_opts_ne_set]
-            st.session_state["base_sa"] = [v for v in (_bare_ne(x) for x in _jload_ne(_bget("slm_additives")))
-                                           if v in _ph_opts_set]
-            st.session_state["base_da"] = [v for v in (_bare_ne(x) for x in _jload_ne(_bget("donor_additives")))
-                                           if v in _ph_opts_set]
-            st.session_state["base_aa"] = [v for v in (_bare_ne(x) for x in _jload_ne(_bget("acceptor_additives")))
-                                           if v in _ph_opts_set]
-            # 各添加剂的含量/浓度文本（自由单位）回填到对应输入框
-            for _i_, _e_ in enumerate(_jload_ne(_bget("donor_additives"))):
-                _c_, _p_ = R.split_name_ratio(str(_e_))
-                st.session_state[f"base_da_pct_{_i_}"] = _p_ if _p_ is not None else ""
-            for _i_, _e_ in enumerate(_jload_ne(_bget("acceptor_additives"))):
-                _c_, _p_ = R.split_name_ratio(str(_e_))
-                st.session_state[f"base_aa_pct_{_i_}"] = _p_ if _p_ is not None else ""
-            for _k, _c in [("base_pd", "pH_donor"), ("base_pa", "pH_acceptor"),
-                           ("base_et", "extract_time"), ("base_ev", "extract_voltage")]:
-                _v = _bget(_c)
-                if _v not in (None, ""):
+                def _jload_ne(v):
                     try:
-                        st.session_state[_k] = float(_v)
-                    except (TypeError, ValueError):
-                        pass
-            for _k, _c in [("base_dc", "donor_composition"), ("base_dbc", "donor_buffer_conc"),
-                           ("base_dac", "donor_additive_conc"), ("base_ac", "acceptor_composition"),
-                           ("base_abc", "acceptor_buffer_conc"), ("base_aac", "acceptor_additive_conc")]:
-                _v = _bget(_c)
-                if _v not in (None, "") and (_k != "base_dc" or str(_v) in all_reagent_opts):
-                    st.session_state[_k] = str(_v)
+                        return json.loads(v) if v else []
+                    except Exception:
+                        return []
 
-            # ---- 各组设置 ----
-            if len(_grow_ne) and res.groups:
-                _grp_map = {int(r["grp"]): r for _, r in _grow_ne.iterrows()}
-                _edited_rows = {}
-                for _i, _g in enumerate(res.groups):
-                    _r = _grp_map.get(int(_g))
-                    if _r is None:
-                        continue
-                    _edit = {}
-                    if _r.get("group_label") and str(_r["group_label"]) != f"M{int(_g)}":
-                        _edit["组别名(留空自动)"] = str(_r["group_label"])  # 纯 M组号=自动回退名，不预填
-                    if _r.get("group_note"):
-                        _edit["备注(手动输入)"] = str(_r["group_note"])
-                    for _cn, _cd in [("供体相pH", "pH_donor"), ("受体相pH", "pH_acceptor"),
-                                     ("萃取时间(分钟)", "extract_time"), ("萃取电压(V)", "extract_voltage")]:
+                def _bare_ne(x):
+                    return R._strip_ratio(x)
+
+                def _bget(c):
+                    return _b.get(c) if len(_b) else None
+
+                # ---- 基准条件（grp=0）----
+                _slm_opts_ne_set = set(_slm_opts_ne)
+                _ph_opts_set = set(phase_add_opts)
+                st.session_state["base_slm"] = [v for v in
+                                                (_bare_ne(x) for x in str(_bget("slm_main") or "").split("+"))
+                                                if v in _slm_opts_ne_set]
+                st.session_state["base_sa"] = [v for v in (_bare_ne(x) for x in _jload_ne(_bget("slm_additives")))
+                                               if v in _ph_opts_set]
+                st.session_state["base_da"] = [v for v in (_bare_ne(x) for x in _jload_ne(_bget("donor_additives")))
+                                               if v in _ph_opts_set]
+                st.session_state["base_aa"] = [v for v in (_bare_ne(x) for x in _jload_ne(_bget("acceptor_additives")))
+                                               if v in _ph_opts_set]
+                # 各添加剂的含量/浓度文本（自由单位）回填到对应输入框
+                for _i_, _e_ in enumerate(_jload_ne(_bget("donor_additives"))):
+                    _c_, _p_ = R.split_name_ratio(str(_e_))
+                    st.session_state[f"base_da_pct_{_i_}"] = _p_ if _p_ is not None else ""
+                for _i_, _e_ in enumerate(_jload_ne(_bget("acceptor_additives"))):
+                    _c_, _p_ = R.split_name_ratio(str(_e_))
+                    st.session_state[f"base_aa_pct_{_i_}"] = _p_ if _p_ is not None else ""
+                for _k, _c in [("base_pd", "pH_donor"), ("base_pa", "pH_acceptor"),
+                               ("base_et", "extract_time"), ("base_ev", "extract_voltage")]:
+                    _v = _bget(_c)
+                    if _v not in (None, ""):
                         try:
-                            _v = float(_r.get(_cd))
-                            _bv = float(_bget(_cd))
-                            if abs(_v - _bv) > 1e-9:
-                                _edit[_cn] = _v
+                            st.session_state[_k] = float(_v)
                         except (TypeError, ValueError):
                             pass
-                    _slm_cell = _bare_ne(str(_r.get("slm_main") or ""))
-                    if _slm_cell and _slm_cell != _bare_ne(str(_bget("slm_main") or ""))                             and _slm_cell in _slm_opts_ne_set:
-                        _edit["主SLM"] = _slm_cell
-                    if _exp_key_ne in ("donor", "all"):
-                        _dl = [_bare_ne(x) for x in _jload_ne(_r.get("donor_additives"))]
-                        _bl = [_bare_ne(x) for x in _jload_ne(_bget("donor_additives"))]
-                        if _dl and _dl != _bl and _dl[0] in _ph_opts_set:
-                            _edit["供体相添加剂"] = _dl[0]
-                    if _exp_key_ne in ("acceptor", "all"):
-                        _al = [_bare_ne(x) for x in _jload_ne(_r.get("acceptor_additives"))]
-                        _bl = [_bare_ne(x) for x in _jload_ne(_bget("acceptor_additives"))]
-                        if _al and _al != _bl and _al[0] in _ph_opts_set:
-                            _edit["受体相添加剂"] = _al[0]
-                    if _edit:
-                        _edited_rows[_i] = _edit
-                # data_editor 不允许 session 预置（ValueAssignmentNotAllowed）→
-                # 把各组条件交给快速表格的输入数据构建（表格直接显示保存值）
-                st.session_state["_ne_gc_autofill"] = (sel, _grow_ne)
-                # 逐组多选（快速表格下方 + all 模式展开区）
-                for _g in res.groups:
-                    _r = _grp_map.get(int(_g))
-                    if _r is None:
-                        continue
-                    st.session_state[f"qa_{_g}_well"] = M.parse_wells(_r.get("well_position") or "")
-                    st.session_state[f"qa_{_g}_tags"] = _jload_ne(_r.get("note_tags"))
-                    st.session_state[f"qa_{_g}_abw"] = M.parse_wells(_r.get("abnormal_wells") or "")
-                    _slm_g = [v for v in (_bare_ne(x) for x in str(_r.get("slm_main") or "").split("+")) if v]
-                    _slm_b = [v for v in (_bare_ne(x) for x in str(_bget("slm_main") or "").split("+")) if v]
-                    if _slm_g and _slm_g != _slm_b:
-                        st.session_state[f"qa_{_g}_slmmain"] = [v for v in _slm_g if v in _slm_opts_ne_set]
-                    st.session_state[f"qa_{_g}_slm"] = [v for v in
-                                                        (_bare_ne(x) for x in _jload_ne(_r.get("slm_additives")))
-                                                        if v in _ph_opts_set]
-                    st.session_state[f"qa_{_g}_don"] = [v for v in
-                                                        (_bare_ne(x) for x in _jload_ne(_r.get("donor_additives")))
-                                                        if v in _ph_opts_set]
-                    st.session_state[f"qa_{_g}_acc"] = [v for v in
-                                                        (_bare_ne(x) for x in _jload_ne(_r.get("acceptor_additives")))
-                                                        if v in _ph_opts_set]
-                    # 逐组详细模式控件（覆盖勾选 + 值）
-                    if _r.get("group_label") and str(_r["group_label"]) != f"M{int(_g)}":
-                        st.session_state[f"g{_g}_label"] = str(_r["group_label"])
-                        st.session_state[f"g{_g}_ov_label"] = True  # 同步勾选手动指定，重生成才不丢
-                    st.session_state[f"g{_g}_well"] = M.parse_wells(_r.get("well_position") or "")
-                    st.session_state[f"g{_g}_abw"] = M.parse_wells(_r.get("abnormal_wells") or "")
-                    st.session_state[f"g{_g}_note"] = str(_r.get("group_note") or "")
-                    for _f in ["pH_donor", "pH_acceptor", "extract_time", "extract_voltage"]:
-                        try:
-                            _v = float(_r.get(_f))
-                            _bv = float(_bget(_f))
-                            if abs(_v - _bv) > 1e-9:
+                for _k, _c in [("base_dc", "donor_composition"), ("base_dbc", "donor_buffer_conc"),
+                               ("base_dac", "donor_additive_conc"), ("base_ac", "acceptor_composition"),
+                               ("base_abc", "acceptor_buffer_conc"), ("base_aac", "acceptor_additive_conc")]:
+                    _v = _bget(_c)
+                    if _v not in (None, "") and (_k != "base_dc" or str(_v) in all_reagent_opts):
+                        st.session_state[_k] = str(_v)
+
+                # ---- 各组设置 ----
+                if len(_grow_ne) and res.groups:
+                    _grp_map = {int(r["grp"]): r for _, r in _grow_ne.iterrows()}
+                    _edited_rows = {}
+                    for _i, _g in enumerate(res.groups):
+                        _r = _grp_map.get(int(_g))
+                        if _r is None:
+                            continue
+                        _edit = {}
+                        if _r.get("group_label") and str(_r["group_label"]) != f"M{int(_g)}":
+                            _edit["组别名(留空自动)"] = str(_r["group_label"])  # 纯 M组号=自动回退名，不预填
+                        if _r.get("group_note"):
+                            _edit["备注(手动输入)"] = str(_r["group_note"])
+                        for _cn, _cd in [("供体相pH", "pH_donor"), ("受体相pH", "pH_acceptor"),
+                                         ("萃取时间(分钟)", "extract_time"), ("萃取电压(V)", "extract_voltage")]:
+                            try:
+                                _v = float(_r.get(_cd))
+                                _bv = float(_bget(_cd))
+                                if abs(_v - _bv) > 1e-9:
+                                    _edit[_cn] = _v
+                            except (TypeError, ValueError):
+                                pass
+                        _slm_cell = _bare_ne(str(_r.get("slm_main") or ""))
+                        if _slm_cell and _slm_cell != _bare_ne(str(_bget("slm_main") or ""))                             and _slm_cell in _slm_opts_ne_set:
+                            _edit["主SLM"] = _slm_cell
+                        if _exp_key_ne in ("donor", "all"):
+                            _dl = [_bare_ne(x) for x in _jload_ne(_r.get("donor_additives"))]
+                            _bl = [_bare_ne(x) for x in _jload_ne(_bget("donor_additives"))]
+                            if _dl and _dl != _bl and _dl[0] in _ph_opts_set:
+                                _edit["供体相添加剂"] = _dl[0]
+                        if _exp_key_ne in ("acceptor", "all"):
+                            _al = [_bare_ne(x) for x in _jload_ne(_r.get("acceptor_additives"))]
+                            _bl = [_bare_ne(x) for x in _jload_ne(_bget("acceptor_additives"))]
+                            if _al and _al != _bl and _al[0] in _ph_opts_set:
+                                _edit["受体相添加剂"] = _al[0]
+                        if _edit:
+                            _edited_rows[_i] = _edit
+                    # data_editor 不允许 session 预置（ValueAssignmentNotAllowed）→
+                    # 把各组条件交给快速表格的输入数据构建（表格直接显示保存值）
+                    st.session_state["_ne_gc_autofill"] = (sel, _grow_ne)
+                    # 逐组多选（快速表格下方 + all 模式展开区）
+                    for _g in res.groups:
+                        _r = _grp_map.get(int(_g))
+                        if _r is None:
+                            continue
+                        st.session_state[f"qa_{_g}_well"] = M.parse_wells(_r.get("well_position") or "")
+                        st.session_state[f"qa_{_g}_tags"] = _jload_ne(_r.get("note_tags"))
+                        st.session_state[f"qa_{_g}_abw"] = M.parse_wells(_r.get("abnormal_wells") or "")
+                        _slm_g = [v for v in (_bare_ne(x) for x in str(_r.get("slm_main") or "").split("+")) if v]
+                        _slm_b = [v for v in (_bare_ne(x) for x in str(_bget("slm_main") or "").split("+")) if v]
+                        if _slm_g and _slm_g != _slm_b:
+                            st.session_state[f"qa_{_g}_slmmain"] = [v for v in _slm_g if v in _slm_opts_ne_set]
+                        st.session_state[f"qa_{_g}_slm"] = [v for v in
+                                                            (_bare_ne(x) for x in _jload_ne(_r.get("slm_additives")))
+                                                            if v in _ph_opts_set]
+                        st.session_state[f"qa_{_g}_don"] = [v for v in
+                                                            (_bare_ne(x) for x in _jload_ne(_r.get("donor_additives")))
+                                                            if v in _ph_opts_set]
+                        st.session_state[f"qa_{_g}_acc"] = [v for v in
+                                                            (_bare_ne(x) for x in _jload_ne(_r.get("acceptor_additives")))
+                                                            if v in _ph_opts_set]
+                        # 逐组详细模式控件（覆盖勾选 + 值）
+                        if _r.get("group_label") and str(_r["group_label"]) != f"M{int(_g)}":
+                            st.session_state[f"g{_g}_label"] = str(_r["group_label"])
+                            st.session_state[f"g{_g}_ov_label"] = True  # 同步勾选手动指定，重生成才不丢
+                        st.session_state[f"g{_g}_well"] = M.parse_wells(_r.get("well_position") or "")
+                        st.session_state[f"g{_g}_abw"] = M.parse_wells(_r.get("abnormal_wells") or "")
+                        st.session_state[f"g{_g}_note"] = str(_r.get("group_note") or "")
+                        for _f in ["pH_donor", "pH_acceptor", "extract_time", "extract_voltage"]:
+                            try:
+                                _v = float(_r.get(_f))
+                                _bv = float(_bget(_f))
+                                if abs(_v - _bv) > 1e-9:
+                                    st.session_state[f"g{_g}_ov_{_f}"] = True
+                                    st.session_state[f"g{_g}_{_f}"] = _v
+                            except (TypeError, ValueError):
+                                pass
+                        for _f in ["donor_composition", "donor_buffer_conc", "donor_additive_conc",
+                                   "acceptor_composition", "acceptor_buffer_conc", "acceptor_additive_conc"]:
+                            _v = str(_r.get(_f) or "")
+                            _bv = str(_bget(_f) or "")
+                            if _v != _bv:
                                 st.session_state[f"g{_g}_ov_{_f}"] = True
                                 st.session_state[f"g{_g}_{_f}"] = _v
-                        except (TypeError, ValueError):
-                            pass
-                    for _f in ["donor_composition", "donor_buffer_conc", "donor_additive_conc",
-                               "acceptor_composition", "acceptor_buffer_conc", "acceptor_additive_conc"]:
-                        _v = str(_r.get(_f) or "")
-                        _bv = str(_bget(_f) or "")
-                        if _v != _bv:
-                            st.session_state[f"g{_g}_ov_{_f}"] = True
-                            st.session_state[f"g{_g}_{_f}"] = _v
-                    for _f in ["slm_additives", "donor_additives", "acceptor_additives"]:
-                        _v = [x for x in (_bare_ne(y) for y in _jload_ne(_r.get(_f))) if x in _ph_opts_set]
-                        _bv = [_bare_ne(y) for y in _jload_ne(_bget(_f))]
-                        if _v != _bv:
-                            st.session_state[f"g{_g}_ov_{_f}"] = True
-                            st.session_state[f"g{_g}_{_f}"] = _v
-                    _slm_v = _bare_ne(str(_r.get("slm_main") or ""))
-                    if _slm_v and _slm_v != _bare_ne(str(_bget("slm_main") or "")) and _slm_v in slm_main_opts:
-                        st.session_state[f"g{_g}_ov_slm_main"] = True
-                        st.session_state[f"g{_g}_slm_main"] = _slm_v
+                        for _f in ["slm_additives", "donor_additives", "acceptor_additives"]:
+                            _v = [x for x in (_bare_ne(y) for y in _jload_ne(_r.get(_f))) if x in _ph_opts_set]
+                            _bv = [_bare_ne(y) for y in _jload_ne(_bget(_f))]
+                            if _v != _bv:
+                                st.session_state[f"g{_g}_ov_{_f}"] = True
+                                st.session_state[f"g{_g}_{_f}"] = _v
+                        _slm_v = _bare_ne(str(_r.get("slm_main") or ""))
+                        if _slm_v and _slm_v != _bare_ne(str(_bget("slm_main") or "")) and _slm_v in slm_main_opts:
+                            st.session_state[f"g{_g}_ov_slm_main"] = True
+                            st.session_state[f"g{_g}_slm_main"] = _slm_v
 
-    def _reagent_fmt(n):
-        return f"🔧 {n}（自定义）" if n in _custom_set else n
+        def _reagent_fmt(n):
+            return f"🔧 {n}（自定义）" if n in _custom_set else n
 
-    def _register_custom_reagent(vals):
-        """自由输入的新名称立即登记为自定义试剂（之后所有下拉框都能选到）。"""
-        for _v in (vals or []):
-            if _v and _v not in _lib_all_set:
-                S.add_custom_reagent(_v)
+        def _register_custom_reagent(vals):
+            """自由输入的新名称立即登记为自定义试剂（之后所有下拉框都能选到）。"""
+            for _v in (vals or []):
+                if _v and _v not in _lib_all_set:
+                    S.add_custom_reagent(_v)
 
-    # 基准条件（默认值从用户设置读取）
-    st.markdown("**基准萃取条件**")
-    bc = st.columns(4)
-    # 按逻辑分组录入，便于阅读
-    st.markdown("**基准萃取条件**")
-    # --- SLM ---
-    st.markdown("🔹 **SLM（支撑液膜）**")
-    base = {}
-    # 主 SLM 多选 + 比例（多选时显示比例输入框，单选可不填）
-    base_slm_sel = st.multiselect("主 SLM（可多选组成混合膜，可直接输入自定义名称）",
-                                  [o for o in slm_main_opts if o != "（无）"], key="base_slm",
-                                  format_func=_reagent_fmt, accept_new_options=True)
-    _register_custom_reagent(base_slm_sel)
-    base_slm_entries = []
-    if len(base_slm_sel) > 1:
-        pct_cols = st.columns(len(base_slm_sel))
-        for i, nm in enumerate(base_slm_sel):
-            pct = pct_cols[i].number_input(f"{nm} 比例(%)", value=100.0 / len(base_slm_sel),
-                                           step=1.0, key=f"base_slm_pct_{i}")
-            base_slm_entries.append(f"{nm} ({pct:g}%)")
-    elif len(base_slm_sel) == 1:
-        base_slm_entries.append(base_slm_sel[0])
-    base["slm_main"] = base_slm_entries[0] if len(base_slm_entries) == 1 else " + ".join(base_slm_entries)
-    base["slm_main_list"] = base_slm_entries
-    bc = st.columns(4)
-    base["slm_additives"] = bc[0].multiselect("SLM 添加剂（可选SLM表全部物质）", slm_add_opts,
-                                               key="base_sa", format_func=_reagent_fmt,
-                                               accept_new_options=True) if slm_add_opts else []
-    _register_custom_reagent(base["slm_additives"])
-    # SLM 添加剂比例输入
-    if base["slm_additives"]:
-        pct_cols = st.columns(len(base["slm_additives"]))
-        entries = []
-        for i, nm in enumerate(base["slm_additives"]):
-            pct = pct_cols[i].number_input(f"{nm} 含量(%)", value=5.0, step=0.5,
-                                           key=f"base_sa_pct_{i}")
-            entries.append(f"{nm} ({pct:g}%)")
-        base["slm_additives"] = entries
-    # --- 供体相 ---
-    st.markdown("🔹 **供体相**")
-    bcd = st.columns(4)
-    base["pH_donor"] = bcd[0].number_input("供体相 pH", value=float(S.get_setting("DEFAULT_PH_DONOR")), step=0.1, key="base_pd")
-    base["donor_additives"] = bcd[1].multiselect("供体相添加剂（可选SLM表全部物质）", phase_add_opts,
-                                                  key="base_da", format_func=_reagent_fmt,
-                                                  accept_new_options=True) if phase_add_opts else []
-    _register_custom_reagent(base["donor_additives"])
-    if base["donor_additives"]:
-        _d_pct = st.columns(len(base["donor_additives"]))
-        _d_ent = []
-        for i, nm in enumerate(base["donor_additives"]):
-            _p = _d_pct[i].text_input(
-                f"供体·{nm} 含量/浓度（单位自定）", key=f"base_da_pct_{i}",
-                value=str(S.get_setting("DEFAULT_DONOR_ADDITIVE_CONC") or ""),
-                placeholder="例：5% 或 10 mM").strip()
-            _d_ent.append(f"{nm} ({_p})" if _p else nm)
-        base["donor_additives"] = _d_ent
-    # 成分：下拉选试剂数据库名单（默认甲酸）
-    _comp_opts = all_reagent_opts or [o for o in slm_main_opts if o != "（无）"]
-    _comp_default = str(S.get_setting("DEFAULT_DONOR_COMPOSITION") or "甲酸")
-    _comp_idx = _comp_opts.index(_comp_default) if _comp_default in _comp_opts else (_comp_opts.index("甲酸") if "甲酸" in _comp_opts else 0)
-    base["donor_composition"] = bcd[2].selectbox("供体相成分（下拉选试剂）", _comp_opts, index=_comp_idx, key="base_dc")
-    base["donor_buffer_conc"] = bcd[3].text_input("供体相缓冲剂浓度", value=str(S.get_setting("DEFAULT_DONOR_BUFFER_CONC") or ""), key="base_dbc")
-    # --- 受体相 ---
-    st.markdown("🔹 **受体相**")
-    bca = st.columns(4)
-    base["pH_acceptor"] = bca[0].number_input("受体相 pH", value=float(S.get_setting("DEFAULT_PH_ACCEPTOR")), step=0.1, key="base_pa")
-    base["acceptor_additives"] = bca[1].multiselect("受体相添加剂（可选SLM表全部物质）", phase_add_opts,
-                                                    key="base_aa", format_func=_reagent_fmt,
-                                                    accept_new_options=True) if phase_add_opts else []
-    _register_custom_reagent(base["acceptor_additives"])
-    if base["acceptor_additives"]:
-        _a_pct = st.columns(len(base["acceptor_additives"]))
-        _a_ent = []
-        for i, nm in enumerate(base["acceptor_additives"]):
-            _p = _a_pct[i].text_input(
-                f"受体·{nm} 含量/浓度（单位自定）", key=f"base_aa_pct_{i}",
-                value=str(S.get_setting("DEFAULT_ACCEPTOR_ADDITIVE_CONC") or ""),
-                placeholder="例：5% 或 10 mM").strip()
-            _a_ent.append(f"{nm} ({_p})" if _p else nm)
-        base["acceptor_additives"] = _a_ent
-    _acomp_default = str(S.get_setting("DEFAULT_ACCEPTOR_COMPOSITION") or "甲酸")
-    _acomp_idx = _comp_opts.index(_acomp_default) if _acomp_default in _comp_opts else (_comp_opts.index("甲酸") if "甲酸" in _comp_opts else 0)
-    base["acceptor_composition"] = bca[2].selectbox("受体相成分（下拉选试剂）", _comp_opts, index=_acomp_idx, key="base_ac")
-    base["acceptor_buffer_conc"] = bca[3].text_input("受体相缓冲剂浓度", value=str(S.get_setting("DEFAULT_ACCEPTOR_BUFFER_CONC") or ""), key="base_abc")
-    # --- 萃取 ---
-    st.markdown("🔹 **萃取条件**")
-    bce = st.columns(2)
-    base["extract_time"] = bce[0].number_input("萃取时间(分钟)", value=float(S.get_setting("DEFAULT_EXTRACT_TIME")), step=1.0, key="base_et")
-    base["extract_voltage"] = bce[1].number_input("萃取电压(V)", value=float(S.get_setting("DEFAULT_EXTRACT_VOLTAGE")), step=5.0, key="base_ev")
+        # 基准条件（默认值从用户设置读取）
+        st.markdown("**基准萃取条件**")
+        bc = st.columns(4)
+        # 按逻辑分组录入，便于阅读
+        # --- SLM ---
+        st.markdown("🔹 **SLM（支撑液膜）**")
+        base = {}
+        # 主 SLM 多选 + 比例（多选时显示比例输入框，单选可不填）
+        base_slm_sel = st.multiselect("主 SLM（可多选组成混合膜，可直接输入自定义名称）",
+                                      [o for o in slm_main_opts if o != "（无）"], key="base_slm",
+                                      format_func=_reagent_fmt, accept_new_options=True)
+        _register_custom_reagent(base_slm_sel)
+        base_slm_entries = []
+        if len(base_slm_sel) > 1:
+            pct_cols = st.columns(len(base_slm_sel))
+            for i, nm in enumerate(base_slm_sel):
+                pct = pct_cols[i].number_input(f"{nm} 比例(%)", value=100.0 / len(base_slm_sel),
+                                               step=1.0, key=f"base_slm_pct_{i}")
+                base_slm_entries.append(f"{nm} ({pct:g}%)")
+        elif len(base_slm_sel) == 1:
+            base_slm_entries.append(base_slm_sel[0])
+        base["slm_main"] = base_slm_entries[0] if len(base_slm_entries) == 1 else " + ".join(base_slm_entries)
+        base["slm_main_list"] = base_slm_entries
+        bc = st.columns(4)
+        base["slm_additives"] = bc[0].multiselect("SLM 添加剂（可选SLM表全部物质）", slm_add_opts,
+                                                   key="base_sa", format_func=_reagent_fmt,
+                                                   accept_new_options=True) if slm_add_opts else []
+        _register_custom_reagent(base["slm_additives"])
+        # SLM 添加剂比例输入
+        if base["slm_additives"]:
+            pct_cols = st.columns(len(base["slm_additives"]))
+            entries = []
+            for i, nm in enumerate(base["slm_additives"]):
+                pct = pct_cols[i].number_input(f"{nm} 含量(%)", value=5.0, step=0.5,
+                                               key=f"base_sa_pct_{i}")
+                entries.append(f"{nm} ({pct:g}%)")
+            base["slm_additives"] = entries
+        # --- 供体相 ---
+        st.markdown("🔹 **供体相**")
+        bcd = st.columns(4)
+        base["pH_donor"] = bcd[0].number_input("供体相 pH", value=float(S.get_setting("DEFAULT_PH_DONOR")), step=0.1, key="base_pd")
+        base["donor_additives"] = bcd[1].multiselect("供体相添加剂（可选SLM表全部物质）", phase_add_opts,
+                                                      key="base_da", format_func=_reagent_fmt,
+                                                      accept_new_options=True) if phase_add_opts else []
+        _register_custom_reagent(base["donor_additives"])
+        if base["donor_additives"]:
+            _d_pct = st.columns(len(base["donor_additives"]))
+            _d_ent = []
+            for i, nm in enumerate(base["donor_additives"]):
+                _p = _d_pct[i].text_input(
+                    f"供体·{nm} 含量/浓度（单位自定）", key=f"base_da_pct_{i}",
+                    value=str(S.get_setting("DEFAULT_DONOR_ADDITIVE_CONC") or ""),
+                    placeholder="例：5% 或 10 mM").strip()
+                _d_ent.append(f"{nm} ({_p})" if _p else nm)
+            base["donor_additives"] = _d_ent
+        # 成分：下拉选试剂数据库名单（默认甲酸）
+        _comp_opts = all_reagent_opts or [o for o in slm_main_opts if o != "（无）"]
+        _comp_default = str(S.get_setting("DEFAULT_DONOR_COMPOSITION") or "甲酸")
+        _comp_idx = _comp_opts.index(_comp_default) if _comp_default in _comp_opts else (_comp_opts.index("甲酸") if "甲酸" in _comp_opts else 0)
+        base["donor_composition"] = bcd[2].selectbox("供体相成分（下拉选试剂）", _comp_opts, index=_comp_idx, key="base_dc")
+        base["donor_buffer_conc"] = bcd[3].text_input("供体相缓冲剂浓度", value=str(S.get_setting("DEFAULT_DONOR_BUFFER_CONC") or ""), key="base_dbc")
+        # --- 受体相 ---
+        st.markdown("🔹 **受体相**")
+        bca = st.columns(4)
+        base["pH_acceptor"] = bca[0].number_input("受体相 pH", value=float(S.get_setting("DEFAULT_PH_ACCEPTOR")), step=0.1, key="base_pa")
+        base["acceptor_additives"] = bca[1].multiselect("受体相添加剂（可选SLM表全部物质）", phase_add_opts,
+                                                        key="base_aa", format_func=_reagent_fmt,
+                                                        accept_new_options=True) if phase_add_opts else []
+        _register_custom_reagent(base["acceptor_additives"])
+        if base["acceptor_additives"]:
+            _a_pct = st.columns(len(base["acceptor_additives"]))
+            _a_ent = []
+            for i, nm in enumerate(base["acceptor_additives"]):
+                _p = _a_pct[i].text_input(
+                    f"受体·{nm} 含量/浓度（单位自定）", key=f"base_aa_pct_{i}",
+                    value=str(S.get_setting("DEFAULT_ACCEPTOR_ADDITIVE_CONC") or ""),
+                    placeholder="例：5% 或 10 mM").strip()
+                _a_ent.append(f"{nm} ({_p})" if _p else nm)
+            base["acceptor_additives"] = _a_ent
+        _acomp_default = str(S.get_setting("DEFAULT_ACCEPTOR_COMPOSITION") or "甲酸")
+        _acomp_idx = _comp_opts.index(_acomp_default) if _acomp_default in _comp_opts else (_comp_opts.index("甲酸") if "甲酸" in _comp_opts else 0)
+        base["acceptor_composition"] = bca[2].selectbox("受体相成分（下拉选试剂）", _comp_opts, index=_acomp_idx, key="base_ac")
+        base["acceptor_buffer_conc"] = bca[3].text_input("受体相缓冲剂浓度", value=str(S.get_setting("DEFAULT_ACCEPTOR_BUFFER_CONC") or ""), key="base_abc")
+        # --- 萃取 ---
+        st.markdown("🔹 **萃取条件**")
+        bce = st.columns(2)
+        base["extract_time"] = bce[0].number_input("萃取时间(分钟)", value=float(S.get_setting("DEFAULT_EXTRACT_TIME")), step=1.0, key="base_et")
+        base["extract_voltage"] = bce[1].number_input("萃取电压(V)", value=float(S.get_setting("DEFAULT_EXTRACT_VOLTAGE")), step=5.0, key="base_ev")
 
-    # 各组覆盖
-    res2 = st.session_state["cur_res"]
-    group_full = {}
-    base_idx = slm_main_opts.index(base["slm_main"]) if base["slm_main"] in slm_main_opts else 0
-
-    group_mode = st.radio(
-        "各组条件录入方式",
-        ["📋 表格快速设置（推荐）", "🔧 逐组详细设置（含添加剂/备注）"],
-        horizontal=True, key="group_mode")
-    st.session_state["_group_mode"] = group_mode
-
-    if group_mode == "📋 表格快速设置（推荐）":
-        _slm_opts_tbl = [o for o in slm_main_opts if o != "（无）"] or [""]
-        # 供体/受体相添加剂列：下拉选（SLM表全部物质 + 自定义登记试剂；"（无）"=清空）
-        _add_opts_tbl = ["（无）"] + phase_add_opts
-        _add_free_note = "（下拉选内置试剂，或到基准表单输入新试剂以登记 🔧 自定义标签；选「（无）」=清空该组添加剂）"
-        st.caption("一张表编辑所有组：**保持基准值/留空 = 继承基准**；改动 = 覆盖该组该字段。"
-                   "表格列随「实验目的」变化（测供体相/受体相时自动出现该相的成分/添加剂列，"
-                   f"添加剂列{_add_free_note}）；"
-                   "SLM膜中添加剂在表格下方逐组点选（下拉选内置名或输入自定义名）。")
-        _exp_key = exp_type["key"]
-        # 按实验目的构建动态列
-        # 各组保存的条件（自动填入：重新打开已录入实验时表格直接显示保存值）
-        _af_grow = None
-        _af = st.session_state.get("_ne_gc_autofill")
-        if _af and _af[0] == sel:
-            _af_grow = _af[1]
-        _af_map = {}
-        if _af_grow is not None and len(_af_grow):
-            _af_map = {int(r["grp"]): r for _, r in _af_grow.iterrows()}
-        # 双向同步：上一轮是逐组详细设置 → 行值用详细模式的有效设置（含标准品组合）
-        _det_state = st.session_state.get("_ne_detail_state") or {}
-        _det_gf = _det_state.get("group_full") if _det_state.get("folder") == sel else None
-        _det_map = {int(g_): _gc_ for g_, _gc_ in (_det_gf or {}).items()}
-        _apply_det = st.session_state.get("_ne_last_group_mode") == "🔧 逐组详细设置（含添加剂/备注）"
-        if _apply_det:
-            # 丢弃旧的编辑增量，避免其覆盖同步进来的值
-            st.session_state.pop("quick_group_tbl", None)
-            # 编辑备份一并失效：否则回放会把切走前的旧快速表格值盖掉详细模式同步的值
-            st.session_state.pop("_ne_qtbl_edits", None)
-        _rows = []
-        for g in res2.groups:
-            _r_af = _af_map.get(int(g))
-            _gc_det = _det_map.get(int(g)) if _apply_det else None
-            # 主SLM单元格：基准为空时留空（不得鹿造第一个试剂名；空=继承基准的空）
-            _slm_cell0 = base["slm_main"] if base["slm_main"] else ""
-            row = {"组": f"M{g}",
-                   "组别名(留空自动)": (str(_r_af.get("group_label")) if _r_af is not None and _r_af.get("group_label")
-                                        and str(_r_af.get("group_label")) != f"M{int(g)}" else ""),  # 纯 M组号=自动回退名，不视为手动命名
-                   "主SLM": _slm_cell0,
-                   "供体相pH": float(base["pH_donor"]), "受体相pH": float(base["pH_acceptor"]),
-                   "萃取时间(分钟)": float(base["extract_time"]),
-                   "萃取电压(V)": float(base["extract_voltage"])}
-            if _r_af is not None:
-                # 主SLM（剥比例后须在选项内，否则保持基准——SelectboxColumn 值必须合法）
-                _slm_cell_af = R._strip_ratio(str(_r_af.get("slm_main") or ""))
-                if _slm_cell_af and _slm_cell_af in _slm_opts_tbl:
-                    row["主SLM"] = _slm_cell_af
-                for _cn, _cd in [("供体相pH", "pH_donor"), ("受体相pH", "pH_acceptor"),
-                                 ("萃取时间(分钟)", "extract_time"), ("萃取电压(V)", "extract_voltage")]:
-                    try:
-                        row[_cn] = float(_r_af.get(_cd))
-                    except (TypeError, ValueError):
-                        pass
-            if _gc_det is not None:
-                # 来自逐组详细模式的有效设置（用户刚在该模式中确认过的值）
-                if _gc_det.get("slm_main"):
-                    _slm_det = R._strip_ratio(str(_gc_det["slm_main"]))
-                    if _slm_det in _slm_opts_tbl:
-                        row["主SLM"] = _slm_det
-                for _cn, _cd in [("供体相pH", "pH_donor"), ("受体相pH", "pH_acceptor"),
-                                 ("萃取时间(分钟)", "extract_time"), ("萃取电压(V)", "extract_voltage")]:
-                    try:
-                        row[_cn] = float(_gc_det.get(_cd))
-                    except (TypeError, ValueError):
-                        pass
-                if _gc_det.get("group_label") and str(_gc_det["group_label"]) != f"M{int(g)}":
-                    row["组别名(留空自动)"] = str(_gc_det["group_label"])  # 纯 M组号=自动回退名，不预填
-                if _gc_det.get("group_note"):
-                    row["备注(手动输入)"] = str(_gc_det["group_note"])
-            if _exp_key in ("donor", "all"):
-                _da0 = R._strip_ratio(base["donor_additives"][0]) if base.get("donor_additives") else ""
-                _da0_content = ""
-                if base.get("donor_additives"):
-                    _, _da0_content = R.split_name_ratio(base["donor_additives"][0])
-                _da_af = ""
-                _da_af_content = ""
-                if _r_af is not None:
-                    _da_entries_af = _as_name_list(_r_af.get("donor_additives"))
-                    if _da_entries_af:
-                        _da_af, _da_af_content = R.split_name_ratio(_da_entries_af[0])
-                        _da_af = R._strip_ratio(_da_af)
-                _cell_upd = {
-                    "供体相成分": (str(_r_af.get("donor_composition")) if _r_af is not None and _r_af.get("donor_composition") else (base.get("donor_composition") or "甲酸")),
-                    "供体相缓冲剂浓度": (str(_r_af.get("donor_buffer_conc")) if _r_af is not None and _r_af.get("donor_buffer_conc") not in (None, "") else str(base.get("donor_buffer_conc") or "")),
-                    "供体相添加剂": (_da_af if _da_af in phase_add_opts else (_da0 or "（无）")),
-                    "供体相含量": (_da_af_content if _da_af_content else (_da0_content or "")),
-                }
-                if _gc_det is not None:
-                    if _gc_det.get("donor_composition"):
-                        _cell_upd["供体相成分"] = str(_gc_det["donor_composition"])
-                    if _gc_det.get("donor_buffer_conc") not in (None, ""):
-                        _cell_upd["供体相缓冲剂浓度"] = str(_gc_det["donor_buffer_conc"])
-                    _det_entries = _as_name_list(_gc_det.get("donor_additives"))
-                    if _det_entries:
-                        _det_name, _det_content = R.split_name_ratio(_det_entries[0])
-                        _det_name = R._strip_ratio(_det_name)
-                        _cell_upd["供体相添加剂"] = _det_name if _det_name in phase_add_opts else _det_name
-                        _cell_upd["供体相含量"] = _det_content or ""
-                row.update(_cell_upd)
-            if _exp_key in ("acceptor", "all"):
-                _aa0 = R._strip_ratio(base["acceptor_additives"][0]) if base.get("acceptor_additives") else ""
-                _aa0_content = ""
-                if base.get("acceptor_additives"):
-                    _, _aa0_content = R.split_name_ratio(base["acceptor_additives"][0])
-                _aa_af = ""
-                _aa_af_content = ""
-                if _r_af is not None:
-                    _aa_entries_af = _as_name_list(_r_af.get("acceptor_additives"))
-                    if _aa_entries_af:
-                        _aa_af, _aa_af_content = R.split_name_ratio(_aa_entries_af[0])
-                        _aa_af = R._strip_ratio(_aa_af)
-                _cell_upd_a = {
-                    "受体相成分": (str(_r_af.get("acceptor_composition")) if _r_af is not None and _r_af.get("acceptor_composition") else (base.get("acceptor_composition") or "甲酸")),
-                    "受体相缓冲剂浓度": (str(_r_af.get("acceptor_buffer_conc")) if _r_af is not None and _r_af.get("acceptor_buffer_conc") not in (None, "") else str(base.get("acceptor_buffer_conc") or "")),
-                    "受体相添加剂": (_aa_af if _aa_af in phase_add_opts else (_aa0 or "（无）")),
-                    "受体相含量": (_aa_af_content if _aa_af_content else (_aa0_content or "")),
-                }
-                if _gc_det is not None:
-                    if _gc_det.get("acceptor_composition"):
-                        _cell_upd_a["受体相成分"] = str(_gc_det["acceptor_composition"])
-                    if _gc_det.get("acceptor_buffer_conc") not in (None, ""):
-                        _cell_upd_a["受体相缓冲剂浓度"] = str(_gc_det["acceptor_buffer_conc"])
-                    _det_entries_a = _as_name_list(_gc_det.get("acceptor_additives"))
-                    if _det_entries_a:
-                        _det_name_a, _det_content_a = R.split_name_ratio(_det_entries_a[0])
-                        _det_name_a = R._strip_ratio(_det_name_a)
-                        _cell_upd_a["受体相添加剂"] = _det_name_a if _det_name_a in phase_add_opts else _det_name_a
-                        _cell_upd_a["受体相含量"] = _det_content_a or ""
-                row.update(_cell_upd_a)
-            # 备注与组别名同理：详细模式同步值已在上方写入，不得再被数据库自动填入值覆盖
-            if not _apply_det:
-                row["备注(手动输入)"] = (str(_r_af.get("group_note")) if _r_af is not None and _r_af.get("group_note") else "")
-            _rows.append(row)
-        _tbl = pd.DataFrame(_rows).set_index("组")
-        # —— 快速表格编辑备份：data_editor 的未提交编辑会在传入数据变化/重渲染时被重置，
-        #    导致用户填好的单元格悄悄丢失（20261030 实测）。每次渲染后把与原始值的差异
-        #    存入会话，下次构建表格时回放，保证任何重跑都不丢编辑。——
-        _tbl_pristine = _tbl.copy()
-        # 失效签名：换文件夹/实验目的/组结构变化（重解析可能改变组语义）→ 旧编辑整体作废，
-        # 同时丢弃控件增量，防止上一个实验的未提交编辑被套到新实验的表上
-        _qbk_sig = (sel, _exp_key, tuple(int(x) for x in res2.groups))
-        _qbk = st.session_state.setdefault("_ne_qtbl_edits", {})
-        if st.session_state.get("_ne_qtbl_edits_sig") != _qbk_sig:
-            _qbk.clear()
-            st.session_state.pop("quick_group_tbl", None)
-            st.session_state["_ne_qtbl_edits_sig"] = _qbk_sig
-        for (_gi_bk, _ci_bk), _v_bk in list(_qbk.items()):
-            if _gi_bk in _tbl.index and _ci_bk in _tbl.columns:
-                _tbl.loc[_gi_bk, _ci_bk] = _v_bk
-        _slm_opts_cell = ([""] + _slm_opts_tbl) if not base["slm_main"] else _slm_opts_tbl
-        _colcfg = {
-            "主SLM": st.column_config.SelectboxColumn(options=_slm_opts_cell),
-            "供体相pH": st.column_config.NumberColumn(format="%.2f"),
-            "受体相pH": st.column_config.NumberColumn(format="%.2f"),
-            "萃取时间(分钟)": st.column_config.NumberColumn(format="%.1f"),
-            "萃取电压(V)": st.column_config.NumberColumn(format="%.1f"),
-        }
-        if _exp_key in ("donor", "all"):
-            _colcfg.update({
-                "供体相成分": st.column_config.SelectboxColumn(options=_comp_opts),
-                "供体相添加剂": st.column_config.SelectboxColumn(
-                    "供体相添加剂", options=_add_opts_tbl,
-                    help="下拉选试剂或「（无）」=清空；SLM表外试剂请改用下方展开点选（可自由输入并登记）"),
-                "供体相含量": st.column_config.TextColumn(
-                    "供体相含量", help="单位自定，如 5% / 10 mM；与添加剂名合并保存"),
-            })
-        if _exp_key in ("acceptor", "all"):
-            _colcfg.update({
-                "受体相成分": st.column_config.SelectboxColumn(options=_comp_opts),
-                "受体相添加剂": st.column_config.SelectboxColumn(
-                    "受体相添加剂", options=_add_opts_tbl,
-                    help="下拉选试剂或「（无）」=清空；SLM表外试剂请改用下方展开点选（可自由输入并登记）"),
-                "受体相含量": st.column_config.TextColumn(
-                    "受体相含量", help="单位自定，如 5% / 10 mM；与添加剂名合并保存"),
-            })
-        _well_opts = ["（未记录）"] + [f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)]
-        _edited = st.data_editor(_tbl, key="quick_group_tbl", width="stretch",
-                                 num_rows="fixed", column_config=_colcfg)
-        # 差异备份（对照未回放备份的原始表）：编辑过→记录，改回原值→移除
-        for _gi_bk in _edited.index:
-            if _gi_bk not in _tbl_pristine.index:
-                continue  # 索引列可编辑：用户改了组名时跳过该行，避免 diff KeyError
-            for _ci_bk in _edited.columns:
-                _nv = _edited.at[_gi_bk, _ci_bk]
-                _pv = _tbl_pristine.at[_gi_bk, _ci_bk]
-                _same = bool(pd.isna(_nv) and pd.isna(_pv)) or (_nv == _pv)
-                _key_bk = (_gi_bk, _ci_bk)
-                if _same:
-                    _qbk.pop(_key_bk, None)
-                else:
-                    _qbk[_key_bk] = None if pd.isna(_nv) else _nv
-        # SLM膜中添加剂 + 异常标签：逐组 multiselect（下拉+自定义；供体/受体添加剂在表格列或all模式下多选）
-        note_tags_opts = S.get_note_tags()
-        st.markdown("**各组 SLM 膜中添加剂 + 异常标签**（添加剂可下拉选内置名或输入自定义名；异常标签如渗漏/烧焦/破裂）")
-        with st.expander("展开点选各组 孔位 / SLM添加剂 / 异常标签 / 异常孔位", expanded=len(res2.groups) <= 6):
-            quick_add = {"slm_additives": {}, "note_tags": {}, "abnormal_wells": {}, "well_positions": {}}
-            _all_wells = [f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)]
-            head_c = st.columns([0.6, 1, 1, 1, 1, 1])
-            head_c[0].markdown("**组**")
-            head_c[1].markdown("**孔位**（可多选）")
-            head_c[2].markdown("**主SLM组合**")
-            head_c[3].markdown("**SLM添加剂**（可多选+比例）")
-            head_c[4].markdown("**异常标签**")
-            head_c[5].markdown("**异常孔位**（可选）")
-            for g in res2.groups:
-                row_c = st.columns([0.6, 1, 1, 1, 1, 1])
-                row_c[0].markdown(f"**M{g}**")
-                quick_add["well_positions"][g] = row_c[1].multiselect(
-                    f"M{g} 孔位（可多选，下拉选择）", _all_wells,
-                    default=[], key=f"qa_{g}_well",
-                    placeholder="下拉选 A1~H12，重复几个选几个")
-                # 主SLM组合（多选+比例，默认继承基准）
-                _slm_main_opts_g = [o for o in slm_main_opts if o != "（无）"]
-                _g_slm_sel = row_c[2].multiselect(
-                    f"M{g} 主SLM组合（可多选）", _slm_main_opts_g,
-                    default=[x for x in base_slm_sel if x in _slm_main_opts_g], key=f"qa_{g}_slmmain",
-                    placeholder="留空=继承基准", format_func=_reagent_fmt,
-                    accept_new_options=True)
-                _register_custom_reagent(_g_slm_sel)
-                _g_slm_entries = []
-                if _g_slm_sel and _g_slm_sel != base_slm_sel:
-                    if len(_g_slm_sel) > 1:
-                        _g_pcts = row_c[2].columns(len(_g_slm_sel))
-                        for i_, nm_ in enumerate(_g_slm_sel):
-                            _p_ = _g_pcts[i_].number_input(f"M{g}·{nm_} %", value=round(100.0/len(_g_slm_sel), 1),
-                                                           step=1.0, key=f"qa_{g}_slmp_{i_}",
-                                                           label_visibility="collapsed")
-                            _g_slm_entries.append(f"{nm_} ({_p_:g}%)")
-                    else:
-                        _g_slm_entries = list(_g_slm_sel)
-                quick_add.setdefault("slm_main_combo", {})[g] = _g_slm_entries
-                # SLM添加剂（多选+比例）
-                quick_add["slm_additives"][g] = row_c[3].multiselect(
-                    f"M{g} SLM添加剂（可多选，含SLM表全部物质）", slm_add_opts,
-                    default=[x for x in (R._strip_ratio(v) for v in (base.get("slm_additives") or [])) if x in slm_add_opts],
-                    key=f"qa_{g}_slm", accept_new_options=True, placeholder="可下拉选或输入",
-                    format_func=_reagent_fmt)
-                _register_custom_reagent(quick_add["slm_additives"][g])
-                if quick_add["slm_additives"][g]:
-                    _sa_pct = row_c[3].columns(len(quick_add["slm_additives"][g]))
-                    _sa_ent = []
-                    for i_, nm_ in enumerate(quick_add["slm_additives"][g]):
-                        _nm_clean, _p_def = R.split_name_ratio(nm_)
-                        if _p_def is None:
-                            _p_def = _base_ratio_map(base.get("slm_additives")).get(_nm_clean)
-                        try:
-                            _p_num = float(str(_p_def).replace("%", "")) if _p_def is not None else 5.0
-                        except ValueError:
-                            _p_num = 5.0
-                        _p_ = _sa_pct[i_].number_input(f"M{g}·{_nm_clean} 含量%",
-                                                       value=_p_num,
-                                                       step=0.5, key=f"qa_{g}_sap_{i_}", label_visibility="collapsed")
-                        _sa_ent.append(f"{_nm_clean} ({_p_:g}%)")
-                    quick_add["slm_additives"][g] = _sa_ent
-                quick_add["note_tags"][g] = row_c[4].multiselect(
-                    f"M{g} 异常标签（可多选）", note_tags_opts,
-                    default=[], key=f"qa_{g}_tags", accept_new_options=True,
-                    placeholder="渗漏/烧焦/破裂…")
-                # 异常孔位选项联动：已填孔位 → 只显示那些孔；未填 → 全部96孔
-                _abw_opts = quick_add["well_positions"].get(g) or _all_wells
-                quick_add["abnormal_wells"][g] = row_c[5].multiselect(
-                    f"M{g} 异常孔位（可选）", _abw_opts,
-                    default=[], key=f"qa_{g}_abw",
-                    help="只在部分电极棒/孔发生异常时才需要填；空=该组使用的孔位全部视为异常")
-        if _exp_key in ("donor", "all"):
-            with st.expander("展开点选各组供体相添加剂（可多选+含量，补充表格单选列；all模式用）", expanded=False):
-                quick_add["donor_additives"] = {}
-                for g in res2.groups:
-                    _don_sel = st.multiselect(
-                        f"M{g} 供体相添加剂（可多选，含SLM表全部物质）", phase_add_opts,
-                        default=[x for x in (R._strip_ratio(v) for v in (base.get("donor_additives") or [])) if x in phase_add_opts],
-                        key=f"qa_{g}_don", accept_new_options=True, placeholder="可下拉选或输入",
-                        format_func=_reagent_fmt)
-                    _register_custom_reagent(_don_sel)
-                    if _don_sel:
-                        _don_pct = st.columns(len(_don_sel))
-                        _don_ent = []
-                        for i_, nm_ in enumerate(_don_sel):
-                            _nm_clean, _p_def = R.split_name_ratio(nm_)
-                            if _p_def is None:
-                                _p_def = _base_ratio_map(base.get("donor_additives")).get(_nm_clean)
-                            _p_ = _don_pct[i_].text_input(
-                                f"M{g}·供体·{_nm_clean} 含量/浓度", key=f"qa_{g}_donp_{i_}",
-                                value=str(_p_def) if _p_def else "",
-                                placeholder="5% / 10 mM", label_visibility="collapsed").strip()
-                            _don_ent.append(f"{_nm_clean} ({_p_})" if _p_ else _nm_clean)
-                        quick_add["donor_additives"][g] = _don_ent
-                    else:
-                        quick_add["donor_additives"][g] = []
-        if _exp_key in ("acceptor", "all"):
-            with st.expander("展开点选各组受体相添加剂（可多选+含量，补充表格单选列；all模式用）", expanded=False):
-                quick_add["acceptor_additives"] = {}
-                for g in res2.groups:
-                    _acc_sel = st.multiselect(
-                        f"M{g} 受体相添加剂（可多选，含SLM表全部物质）", phase_add_opts,
-                        default=[x for x in (R._strip_ratio(v) for v in (base.get("acceptor_additives") or [])) if x in phase_add_opts],
-                        key=f"qa_{g}_acc", accept_new_options=True, placeholder="可下拉选或输入",
-                        format_func=_reagent_fmt)
-                    _register_custom_reagent(_acc_sel)
-                    if _acc_sel:
-                        _acc_pct = st.columns(len(_acc_sel))
-                        _acc_ent = []
-                        for i_, nm_ in enumerate(_acc_sel):
-                            _nm_clean, _p_def = R.split_name_ratio(nm_)
-                            if _p_def is None:
-                                _p_def = _base_ratio_map(base.get("acceptor_additives")).get(_nm_clean)
-                            _p_ = _acc_pct[i_].text_input(
-                                f"M{g}·受体·{_nm_clean} 含量/浓度", key=f"qa_{g}_accp_{i_}",
-                                value=str(_p_def) if _p_def else "",
-                                placeholder="5% / 10 mM", label_visibility="collapsed").strip()
-                            _acc_ent.append(f"{_nm_clean} ({_p_})" if _p_ else _nm_clean)
-                        quick_add["acceptor_additives"][g] = _acc_ent
-                    else:
-                        quick_add["acceptor_additives"][g] = []
-        for g in res2.groups:
-            _row_key = f"M{g}"
-            # 「组」索引列可编辑：用户改了组名时 _edited 不含 M{g}，退回构建值防 KeyError 崩页
-            r = _edited.loc[_row_key] if _row_key in _edited.index else _tbl.loc[_row_key]
-            gc = {}
-            # 本组的自动填入行（每组各自取，不得用上一循环残留值）
-            _r_af = _af_map.get(int(g))
-            # 与基准比较：不同则覆盖
-            # 标准品组合：保留逐组详细模式中的选择；无详细状态时保留数据库已存组合
-            # （否则老实验在快速表格模式下重新生成会把各组组合清成默认）
-            _gc_det_qc = _det_map.get(int(g)) if _apply_det else None
-            _af_qc = str(_r_af.get("qc_combo")) if _r_af is not None and _r_af.get("qc_combo") else ""
-            gc["qc_combo"] = (str(_gc_det_qc.get("qc_combo")) if _gc_det_qc is not None and _gc_det_qc.get("qc_combo")
-                              else _af_qc)
-            _lbl_raw = r["组别名(留空自动)"]
-            lbl = "" if pd.isna(_lbl_raw) else str(_lbl_raw).strip()
-            if lbl in ("None", "nan"):
-                lbl = ""
-            gc["group_label"] = lbl if lbl else None
-            _g_combo = quick_add.get("slm_main_combo", {}).get(g) or []
-            if _g_combo:
-                gc["slm_main"] = " + ".join(_g_combo) if len(_g_combo) > 1 else _g_combo[0]
-            else:
-                # NaN/空单元格 = 未改动 → 继承基准（NaN 会存成 NULL 或 "nan" 标签）
-                _slm_cell = "" if pd.isna(r["主SLM"]) else str(r["主SLM"]).strip()
-                if _slm_cell and _slm_cell != str(base["slm_main"]):
-                    gc["slm_main"] = _slm_cell
-                else:
-                    gc["slm_main"] = base["slm_main"]
-
-            def _num_cell(_v, _base_v):
-                try:
-                    if pd.isna(_v):
-                        return _base_v
-                except (TypeError, ValueError):
-                    return _base_v
-                return float(_v) if float(_v) != float(_base_v) else _base_v
-
-            gc["pH_donor"] = _num_cell(r["供体相pH"], base["pH_donor"])
-            gc["pH_acceptor"] = _num_cell(r["受体相pH"], base["pH_acceptor"])
-            gc["extract_time"] = _num_cell(r["萃取时间(分钟)"], base["extract_time"])
-            gc["extract_voltage"] = _num_cell(r["萃取电压(V)"], base["extract_voltage"])
-            gc["slm_additives"] = list(quick_add["slm_additives"].get(g) or [])
-            # donor/acceptor 动态列
-            if _exp_key in ("donor", "all"):
-                gc["donor_composition"] = str(r["供体相成分"]) if str(r["供体相成分"]) != str(base.get("donor_composition")) else base.get("donor_composition")
-                gc["donor_buffer_conc"] = str(r["供体相缓冲剂浓度"]) if str(r["供体相缓冲剂浓度"]) != str(base.get("donor_buffer_conc") or "") else base.get("donor_buffer_conc")
-                tbl_add = str(r["供体相添加剂"])
-                # 优先级：表格单元格改动 > 展开点选改动（基准为空时也生效）> 显式清空 > 继承基准
-                _base_list = list(base.get("donor_additives") or [])
-                _base_da0 = R._strip_ratio(_base_list[0]) if _base_list else ""
-                _, _base_da0_content = R.split_name_ratio(_base_list[0]) if _base_list else ("", None)
-                _base_da0_content = str(_base_da0_content or "")
-                ms_list = list(quick_add.get("donor_additives", {}).get(g) or [])
-                _ms_changed = [R._strip_ratio(x) for x in ms_list] != [R._strip_ratio(x) for x in _base_list]
-                _tbl_content = str(r.get("供体相含量") or "").strip()
-                if tbl_add not in ("（无）", "", "None") and tbl_add != _base_da0:
-                    gc["donor_additives"] = [f"{tbl_add} ({_tbl_content})" if _tbl_content else tbl_add]
-                elif (tbl_add == _base_da0 and _tbl_content
-                      and _tbl_content != _base_da0_content):
-                    # 名称同基准但含量改了 → 覆盖
-                    gc["donor_additives"] = [f"{tbl_add} ({_tbl_content})"]
-                elif _ms_changed:
-                    gc["donor_additives"] = ms_list
-                elif tbl_add in ("（无）", "", "None"):
-                    gc["donor_additives"] = []
-                else:
-                    gc["donor_additives"] = ms_list if ms_list else _base_list
-            if _exp_key in ("acceptor", "all"):
-                gc["acceptor_composition"] = str(r["受体相成分"]) if str(r["受体相成分"]) != str(base.get("acceptor_composition")) else base.get("acceptor_composition")
-                gc["acceptor_buffer_conc"] = str(r["受体相缓冲剂浓度"]) if str(r["受体相缓冲剂浓度"]) != str(base.get("acceptor_buffer_conc") or "") else base.get("acceptor_buffer_conc")
-                tbl_add_a = str(r["受体相添加剂"])
-                # 与供体相同规则：表格改动 > 展开点选改动 > 显式清空 > 继承基准
-                _base_list_a = list(base.get("acceptor_additives") or [])
-                _base_aa0 = R._strip_ratio(_base_list_a[0]) if _base_list_a else ""
-                _, _base_aa0_content = R.split_name_ratio(_base_list_a[0]) if _base_list_a else ("", None)
-                _base_aa0_content = str(_base_aa0_content or "")
-                ms_list_a = list(quick_add.get("acceptor_additives", {}).get(g) or [])
-                _ms_changed_a = [R._strip_ratio(x) for x in ms_list_a] != [R._strip_ratio(x) for x in _base_list_a]
-                _tbl_content_a = str(r.get("受体相含量") or "").strip()
-                if tbl_add_a not in ("（无）", "", "None") and tbl_add_a != _base_aa0:
-                    gc["acceptor_additives"] = [f"{tbl_add_a} ({_tbl_content_a})" if _tbl_content_a else tbl_add_a]
-                elif (tbl_add_a == _base_aa0 and _tbl_content_a
-                      and _tbl_content_a != _base_aa0_content):
-                    gc["acceptor_additives"] = [f"{tbl_add_a} ({_tbl_content_a})"]
-                elif _ms_changed_a:
-                    gc["acceptor_additives"] = ms_list_a
-                elif tbl_add_a in ("（无）", "", "None"):
-                    gc["acceptor_additives"] = []
-                else:
-                    gc["acceptor_additives"] = ms_list_a if ms_list_a else _base_list_a
-            # 备注（手动文本 + 异常标签 + 孔位 + 异常孔位）
-            gc["group_note"] = str(r["备注(手动输入)"]).strip()
-            gc["note_tags"] = list(quick_add["note_tags"].get(g) or [])
-            gc["well_position"] = json.dumps(
-                list(quick_add.get("well_positions", {}).get(g) or []), ensure_ascii=False)
-            gc["abnormal_wells"] = json.dumps(
-                list(quick_add.get("abnormal_wells", {}).get(g) or []), ensure_ascii=False)
-            # 兜底：非 donor/acceptor 目的时动态列不存在，组级字段必须继承基准（否则存 None）
-            for k in ["donor_composition", "donor_buffer_conc", "donor_additive_conc",
-                      "donor_additives", "acceptor_composition", "acceptor_buffer_conc",
-                      "acceptor_additive_conc", "acceptor_additives"]:
-                if k not in gc or gc[k] is None:
-                    v = base.get(k)
-                    gc[k] = list(v) if isinstance(v, list) else v
-            group_full[g] = gc
-        st.session_state["_ne_quick_state"] = {"folder": sel, "group_full": group_full}
-        st.session_state["_ne_last_group_mode"] = "📋 表格快速设置（推荐）"
-    else:
         # 各组覆盖
-        st.markdown("**各组条件**（勾选「覆盖」才会修改该字段；组别名默认自动生成）")
         res2 = st.session_state["cur_res"]
         group_full = {}
         base_idx = slm_main_opts.index(base["slm_main"]) if base["slm_main"] in slm_main_opts else 0
-        # 双向同步：上一轮是快速表格 → 逐组控件按快速表格的有效设置预置
-        _quick_state = st.session_state.get("_ne_quick_state") or {}
-        _quick_gf = _quick_state.get("group_full") if _quick_state.get("folder") == sel else None
-        _apply_quick = st.session_state.get("_ne_last_group_mode") == "📋 表格快速设置（推荐）"
 
-        for g in res2.groups:
-            with st.expander(f"M{g}", expanded=(g <= 3)):
-                gc = {}
-                # —— 从快速表格同步（仅模式切换后的第一轮；之后不再覆写用户在详细模式的改动）——
-                if _apply_quick and _quick_gf and int(g) in _quick_gf:
-                    _qgc = _quick_gf[int(g)]
-                    for _f_ in ["pH_donor", "pH_acceptor", "extract_time", "extract_voltage"]:
+        group_mode = st.radio(
+            "各组条件录入方式",
+            ["📋 表格快速设置（推荐）", "🔧 逐组详细设置（含添加剂/备注）"],
+            horizontal=True, key="group_mode")
+        st.session_state["_group_mode"] = group_mode
+
+        if group_mode == "📋 表格快速设置（推荐）":
+            _slm_opts_tbl = [o for o in slm_main_opts if o != "（无）"] or [""]
+            # 供体/受体相添加剂列：下拉选（SLM表全部物质 + 自定义登记试剂；"（无）"=清空）
+            _add_opts_tbl = ["（无）"] + phase_add_opts
+            _add_free_note = "（下拉选内置试剂，或到基准表单输入新试剂以登记 🔧 自定义标签；选「（无）」=清空该组添加剂）"
+            st.caption("一张表编辑所有组：**保持基准值/留空 = 继承基准**；改动 = 覆盖该组该字段。"
+                       "表格列随「实验目的」变化（测供体相/受体相时自动出现该相的成分/添加剂列，"
+                       f"添加剂列{_add_free_note}）；"
+                       "SLM膜中添加剂在表格下方逐组点选（下拉选内置名或输入自定义名）。")
+            _exp_key = exp_type["key"]
+            # 按实验目的构建动态列
+            # 各组保存的条件（自动填入：重新打开已录入实验时表格直接显示保存值）
+            _af_grow = None
+            _af = st.session_state.get("_ne_gc_autofill")
+            if _af and _af[0] == sel:
+                _af_grow = _af[1]
+            _af_map = {}
+            if _af_grow is not None and len(_af_grow):
+                _af_map = {int(r["grp"]): r for _, r in _af_grow.iterrows()}
+            # 双向同步：上一轮是逐组详细设置 → 行值用详细模式的有效设置（含标准品组合）
+            _det_state = st.session_state.get("_ne_detail_state") or {}
+            _det_gf = _det_state.get("group_full") if _det_state.get("folder") == sel else None
+            _det_map = {int(g_): _gc_ for g_, _gc_ in (_det_gf or {}).items()}
+            _apply_det = st.session_state.get("_ne_last_group_mode") == "🔧 逐组详细设置（含添加剂/备注）"
+            if _apply_det:
+                # 丢弃旧的编辑增量，避免其覆盖同步进来的值
+                st.session_state.pop("quick_group_tbl", None)
+                # 编辑备份一并失效：否则回放会把切走前的旧快速表格值盖掉详细模式同步的值
+                st.session_state.pop("_ne_qtbl_edits", None)
+            _rows = []
+            for g in res2.groups:
+                _r_af = _af_map.get(int(g))
+                _gc_det = _det_map.get(int(g)) if _apply_det else None
+                # 主SLM单元格：基准为空时留空（不得鹿造第一个试剂名；空=继承基准的空）
+                _slm_cell0 = base["slm_main"] if base["slm_main"] else ""
+                row = {"组": f"M{g}",
+                       "组别名(留空自动)": (str(_r_af.get("group_label")) if _r_af is not None and _r_af.get("group_label")
+                                            and str(_r_af.get("group_label")) != f"M{int(g)}" else ""),  # 纯 M组号=自动回退名，不视为手动命名
+                       "主SLM": _slm_cell0,
+                       "供体相pH": float(base["pH_donor"]), "受体相pH": float(base["pH_acceptor"]),
+                       "萃取时间(分钟)": float(base["extract_time"]),
+                       "萃取电压(V)": float(base["extract_voltage"])}
+                if _r_af is not None:
+                    # 主SLM（剥比例后须在选项内，否则保持基准——SelectboxColumn 值必须合法）
+                    _slm_cell_af = R._strip_ratio(str(_r_af.get("slm_main") or ""))
+                    if _slm_cell_af and _slm_cell_af in _slm_opts_tbl:
+                        row["主SLM"] = _slm_cell_af
+                    for _cn, _cd in [("供体相pH", "pH_donor"), ("受体相pH", "pH_acceptor"),
+                                     ("萃取时间(分钟)", "extract_time"), ("萃取电压(V)", "extract_voltage")]:
                         try:
-                            _v_ = float(_qgc.get(_f_))
-                            _bv_ = float(base.get(_f_))
+                            row[_cn] = float(_r_af.get(_cd))
                         except (TypeError, ValueError):
-                            continue
-                        if abs(_v_ - _bv_) > 1e-9:
-                            st.session_state[f"g{g}_ov_{_f_}"] = True
-                            st.session_state[f"g{g}_{_f_}"] = _v_
-                    for _f_ in ["donor_composition", "donor_buffer_conc",
-                                "acceptor_composition", "acceptor_buffer_conc"]:
-                        _v_ = str(_qgc.get(_f_) or "")
-                        _bv_ = str(base.get(_f_) or "")
-                        if _v_ and _v_ != _bv_:
-                            st.session_state[f"g{g}_ov_{_f_}"] = True
-                            st.session_state[f"g{g}_{_f_}"] = _v_
-                    for _f_, _cf_ in [("slm_additives", None), ("donor_additives", "供体相含量"),
-                                      ("acceptor_additives", "受体相含量")]:
-                        _v_list = [R._strip_ratio(x) for x in _as_name_list(_qgc.get(_f_))]
-                        _bv_list = [R._strip_ratio(x) for x in _as_name_list(base.get(_f_))]
-                        if _v_list and _v_list != _bv_list:
-                            st.session_state[f"g{g}_ov_{_f_}"] = True
-                            _seed_list = list(_v_list)
-                            # 含量列的文本并入第一个添加剂（保留用户在快速表格填的单位）
-                            if _cf_ and _seed_list:
-                                _ct = str(_qgc.get(_cf_) or "").strip()
-                                if _ct:
-                                    _seed_list[0] = f"{_seed_list[0]} ({_ct})"
-                            st.session_state[f"g{g}_{_f_}"] = _seed_list
-                    if _qgc.get("slm_main") and str(_qgc["slm_main"]) != str(base.get("slm_main")):
-                        _slm_v_ = R._strip_ratio(str(_qgc["slm_main"]))
-                        if _slm_v_ in slm_main_opts:
-                            st.session_state[f"g{g}_ov_slm_main"] = True
-                            st.session_state[f"g{g}_slm_main"] = _slm_v_
-                    if _qgc.get("group_label"):
-                        st.session_state[f"g{g}_ov_label"] = True
-                        st.session_state[f"g{g}_label"] = str(_qgc["group_label"])
-                    if _qgc.get("well_position"):
-                        st.session_state[f"g{g}_well"] = M.parse_wells(_qgc["well_position"])
-                    if _qgc.get("abnormal_wells"):
-                        st.session_state[f"g{g}_abw"] = M.parse_wells(_qgc["abnormal_wells"])
-                    if _qgc.get("note_tags"):
-                        st.session_state[f"g{g}_tags"] = list(_qgc["note_tags"])
-                    if _qgc.get("group_note"):
-                        st.session_state[f"g{g}_note"] = str(_qgc["group_note"])
-                    if _qgc.get("qc_combo"):
-                        st.session_state[f"g{g}_qc_combo"] = str(_qgc["qc_combo"])
-
-                # 标准品组合（多标准品模式：该组回收率/转移率基于所选组合计算）
-                _combos_avail = st.session_state.get("ne_qc_combos") or []
-                if st.session_state.get("ne_multi_qc") and _combos_avail:
-                    _combo_names = [c.get("name") for c in _combos_avail]
-                    gc["qc_combo"] = st.selectbox(
-                        f"M{g} 标准品组合（供受体相质控）",
-                        ["（默认组合）"] + _combo_names,
-                        key=f"g{g}_qc_combo",
-                        help="该组的回收率/转移率/三相分布将基于所选组合的标准品与空白计算")
-                    if gc["qc_combo"] == "（默认组合）":
-                        gc["qc_combo"] = ""  # 存空串（默认），不存字面量
-                else:
-                    gc["qc_combo"] = ""
-                # 组别名：自动生成（只读显示，避免 Streamlit widget state 干扰）；
-                # 勾选"手动指定"才出现输入框
-                gc_manual_override = st.checkbox(f"M{g} 手动指定组别名", key=f"g{g}_ov_label")
-                if gc_manual_override:
-                    # 基于基准预填一个默认，用户可改
-                    auto_prefill = N.generate_group_label(exp_type["key"],
-                        slm_main=base["slm_main"], slm_additives=base["slm_additives"],
-                        pH_donor=base["pH_donor"], donor_additives=base["donor_additives"],
-                        pH_acceptor=base["pH_acceptor"], acceptor_additives=base["acceptor_additives"],
-                        extract_time=base["extract_time"], extract_voltage=base["extract_voltage"],
-                        donor_composition=base.get("donor_composition") or "",
-                        acceptor_composition=base.get("acceptor_composition") or "")
-                    custom_label = st.text_input(f"M{g} 组别名", value=auto_prefill or f"M{g}", key=f"g{g}_label")
-                    gc["group_label"] = custom_label
-                else:
-                    # 自动生成：提交时按实际条件生成（此处占位，提交逻辑处理）
-                    gc["group_label"] = None  # None = 自动
-                    st.caption("组别名将在提交时按该组实际条件自动生成")
-
-                # 通用：覆盖文本字段助手
-                def _ov_text(col, oc_idx, field, label, base_val):
-                    if col[oc_idx].checkbox(f"覆盖{label}", key=f"g{g}_ov_{field}"):
-                        gc[field] = col[oc_idx].text_input(label, value=str(base_val or ""), key=f"g{g}_{field}")
+                            pass
+                if _gc_det is not None:
+                    # 来自逐组详细模式的有效设置（用户刚在该模式中确认过的值）
+                    if _gc_det.get("slm_main"):
+                        _slm_det = R._strip_ratio(str(_gc_det["slm_main"]))
+                        if _slm_det in _slm_opts_tbl:
+                            row["主SLM"] = _slm_det
+                    for _cn, _cd in [("供体相pH", "pH_donor"), ("受体相pH", "pH_acceptor"),
+                                     ("萃取时间(分钟)", "extract_time"), ("萃取电压(V)", "extract_voltage")]:
+                        try:
+                            row[_cn] = float(_gc_det.get(_cd))
+                        except (TypeError, ValueError):
+                            pass
+                    if _gc_det.get("group_label") and str(_gc_det["group_label"]) != f"M{int(g)}":
+                        row["组别名(留空自动)"] = str(_gc_det["group_label"])  # 纯 M组号=自动回退名，不预填
+                    if _gc_det.get("group_note"):
+                        row["备注(手动输入)"] = str(_gc_det["group_note"])
+                if _exp_key in ("donor", "all"):
+                    _da0 = R._strip_ratio(base["donor_additives"][0]) if base.get("donor_additives") else ""
+                    _da0_content = ""
+                    if base.get("donor_additives"):
+                        _, _da0_content = R.split_name_ratio(base["donor_additives"][0])
+                    _da_af = ""
+                    _da_af_content = ""
+                    if _r_af is not None:
+                        _da_entries_af = _as_name_list(_r_af.get("donor_additives"))
+                        if _da_entries_af:
+                            _da_af, _da_af_content = R.split_name_ratio(_da_entries_af[0])
+                            _da_af = R._strip_ratio(_da_af)
+                    _cell_upd = {
+                        "供体相成分": (str(_r_af.get("donor_composition")) if _r_af is not None and _r_af.get("donor_composition") else (base.get("donor_composition") or "甲酸")),
+                        "供体相缓冲剂浓度": (str(_r_af.get("donor_buffer_conc")) if _r_af is not None and _r_af.get("donor_buffer_conc") not in (None, "") else str(base.get("donor_buffer_conc") or "")),
+                        "供体相添加剂": (_da_af if _da_af in phase_add_opts else (_da0 or "（无）")),
+                        "供体相含量": (_da_af_content if _da_af_content else (_da0_content or "")),
+                    }
+                    if _gc_det is not None:
+                        if _gc_det.get("donor_composition"):
+                            _cell_upd["供体相成分"] = str(_gc_det["donor_composition"])
+                        if _gc_det.get("donor_buffer_conc") not in (None, ""):
+                            _cell_upd["供体相缓冲剂浓度"] = str(_gc_det["donor_buffer_conc"])
+                        _det_entries = _as_name_list(_gc_det.get("donor_additives"))
+                        if _det_entries:
+                            _det_name, _det_content = R.split_name_ratio(_det_entries[0])
+                            _det_name = R._strip_ratio(_det_name)
+                            _cell_upd["供体相添加剂"] = _det_name if _det_name in phase_add_opts else _det_name
+                            _cell_upd["供体相含量"] = _det_content or ""
+                    row.update(_cell_upd)
+                if _exp_key in ("acceptor", "all"):
+                    _aa0 = R._strip_ratio(base["acceptor_additives"][0]) if base.get("acceptor_additives") else ""
+                    _aa0_content = ""
+                    if base.get("acceptor_additives"):
+                        _, _aa0_content = R.split_name_ratio(base["acceptor_additives"][0])
+                    _aa_af = ""
+                    _aa_af_content = ""
+                    if _r_af is not None:
+                        _aa_entries_af = _as_name_list(_r_af.get("acceptor_additives"))
+                        if _aa_entries_af:
+                            _aa_af, _aa_af_content = R.split_name_ratio(_aa_entries_af[0])
+                            _aa_af = R._strip_ratio(_aa_af)
+                    _cell_upd_a = {
+                        "受体相成分": (str(_r_af.get("acceptor_composition")) if _r_af is not None and _r_af.get("acceptor_composition") else (base.get("acceptor_composition") or "甲酸")),
+                        "受体相缓冲剂浓度": (str(_r_af.get("acceptor_buffer_conc")) if _r_af is not None and _r_af.get("acceptor_buffer_conc") not in (None, "") else str(base.get("acceptor_buffer_conc") or "")),
+                        "受体相添加剂": (_aa_af if _aa_af in phase_add_opts else (_aa0 or "（无）")),
+                        "受体相含量": (_aa_af_content if _aa_af_content else (_aa0_content or "")),
+                    }
+                    if _gc_det is not None:
+                        if _gc_det.get("acceptor_composition"):
+                            _cell_upd_a["受体相成分"] = str(_gc_det["acceptor_composition"])
+                        if _gc_det.get("acceptor_buffer_conc") not in (None, ""):
+                            _cell_upd_a["受体相缓冲剂浓度"] = str(_gc_det["acceptor_buffer_conc"])
+                        _det_entries_a = _as_name_list(_gc_det.get("acceptor_additives"))
+                        if _det_entries_a:
+                            _det_name_a, _det_content_a = R.split_name_ratio(_det_entries_a[0])
+                            _det_name_a = R._strip_ratio(_det_name_a)
+                            _cell_upd_a["受体相添加剂"] = _det_name_a if _det_name_a in phase_add_opts else _det_name_a
+                            _cell_upd_a["受体相含量"] = _det_content_a or ""
+                    row.update(_cell_upd_a)
+                # 备注与组别名同理：详细模式同步值已在上方写入，不得再被数据库自动填入值覆盖
+                if not _apply_det:
+                    row["备注(手动输入)"] = (str(_r_af.get("group_note")) if _r_af is not None and _r_af.get("group_note") else "")
+                _rows.append(row)
+            _tbl = pd.DataFrame(_rows).set_index("组")
+            # —— 快速表格编辑备份：data_editor 的未提交编辑会在传入数据变化/重渲染时被重置，
+            #    导致用户填好的单元格悄悄丢失（20261030 实测）。每次渲染后把与原始值的差异
+            #    存入会话，下次构建表格时回放，保证任何重跑都不丢编辑。——
+            _tbl_pristine = _tbl.copy()
+            # 失效签名：换文件夹/实验目的/组结构变化（重解析可能改变组语义）→ 旧编辑整体作废，
+            # 同时丢弃控件增量，防止上一个实验的未提交编辑被套到新实验的表上
+            _qbk_sig = (sel, _exp_key, tuple(int(x) for x in res2.groups))
+            _qbk = st.session_state.setdefault("_ne_qtbl_edits", {})
+            if st.session_state.get("_ne_qtbl_edits_sig") != _qbk_sig:
+                _qbk.clear()
+                st.session_state.pop("quick_group_tbl", None)
+                st.session_state["_ne_qtbl_edits_sig"] = _qbk_sig
+            for (_gi_bk, _ci_bk), _v_bk in list(_qbk.items()):
+                if _gi_bk in _tbl.index and _ci_bk in _tbl.columns:
+                    _tbl.loc[_gi_bk, _ci_bk] = _v_bk
+            _slm_opts_cell = ([""] + _slm_opts_tbl) if not base["slm_main"] else _slm_opts_tbl
+            _colcfg = {
+                "主SLM": st.column_config.SelectboxColumn(options=_slm_opts_cell),
+                "供体相pH": st.column_config.NumberColumn(format="%.2f"),
+                "受体相pH": st.column_config.NumberColumn(format="%.2f"),
+                "萃取时间(分钟)": st.column_config.NumberColumn(format="%.1f"),
+                "萃取电压(V)": st.column_config.NumberColumn(format="%.1f"),
+            }
+            if _exp_key in ("donor", "all"):
+                _colcfg.update({
+                    "供体相成分": st.column_config.SelectboxColumn(options=_comp_opts),
+                    "供体相添加剂": st.column_config.SelectboxColumn(
+                        "供体相添加剂", options=_add_opts_tbl,
+                        help="下拉选试剂或「（无）」=清空；SLM表外试剂请改用下方展开点选（可自由输入并登记）"),
+                    "供体相含量": st.column_config.TextColumn(
+                        "供体相含量", help="单位自定，如 5% / 10 mM；与添加剂名合并保存"),
+                })
+            if _exp_key in ("acceptor", "all"):
+                _colcfg.update({
+                    "受体相成分": st.column_config.SelectboxColumn(options=_comp_opts),
+                    "受体相添加剂": st.column_config.SelectboxColumn(
+                        "受体相添加剂", options=_add_opts_tbl,
+                        help="下拉选试剂或「（无）」=清空；SLM表外试剂请改用下方展开点选（可自由输入并登记）"),
+                    "受体相含量": st.column_config.TextColumn(
+                        "受体相含量", help="单位自定，如 5% / 10 mM；与添加剂名合并保存"),
+                })
+            _well_opts = ["（未记录）"] + [f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)]
+            _edited = st.data_editor(_tbl, key="quick_group_tbl", width="stretch",
+                                     num_rows="fixed", column_config=_colcfg)
+            # 差异备份（对照未回放备份的原始表）：编辑过→记录，改回原值→移除
+            for _gi_bk in _edited.index:
+                if _gi_bk not in _tbl_pristine.index:
+                    continue  # 索引列可编辑：用户改了组名时跳过该行，避免 diff KeyError
+                for _ci_bk in _edited.columns:
+                    _nv = _edited.at[_gi_bk, _ci_bk]
+                    _pv = _tbl_pristine.at[_gi_bk, _ci_bk]
+                    _same = bool(pd.isna(_nv) and pd.isna(_pv)) or (_nv == _pv)
+                    _key_bk = (_gi_bk, _ci_bk)
+                    if _same:
+                        _qbk.pop(_key_bk, None)
                     else:
-                        gc[field] = base_val
-                def _ov_num(col, oc_idx, field, label, base_val, step):
-                    if col[oc_idx].checkbox(f"覆盖{label}", key=f"g{g}_ov_{field}"):
-                        gc[field] = col[oc_idx].number_input(label, value=float(base_val), step=step, key=f"g{g}_{field}")
-                    else:
-                        gc[field] = base_val
-                def _ov_multi(col, oc_idx, field, label, base_val, opts=None, opts_label=None,
-                              with_content=False, unit_free=False):
-                    _opts = opts if opts is not None else slm_add_opts
-                    if _opts and col[oc_idx].checkbox(f"覆盖{label}", key=f"g{g}_ov_{field}"):
-                        gc[field] = col[oc_idx].multiselect(
-                            opts_label or label, _opts,
-                            default=[x for x in (R._strip_ratio(v) for v in (base_val or []))
-                                     if x in _opts or _opts is slm_add_opts and R._strip_ratio(x) in _opts],
-                            key=f"g{g}_{field}", accept_new_options=True,
+                        _qbk[_key_bk] = None if pd.isna(_nv) else _nv
+            # SLM膜中添加剂 + 异常标签：逐组 multiselect（下拉+自定义；供体/受体添加剂在表格列或all模式下多选）
+            note_tags_opts = S.get_note_tags()
+            st.markdown("**各组 SLM 膜中添加剂 + 异常标签**（添加剂可下拉选内置名或输入自定义名；异常标签如渗漏/烧焦/破裂）")
+            with st.expander("展开点选各组 孔位 / SLM添加剂 / 异常标签 / 异常孔位", expanded=len(res2.groups) <= 6):
+                quick_add = {"slm_additives": {}, "note_tags": {}, "abnormal_wells": {}, "well_positions": {}}
+                _all_wells = [f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)]
+                head_c = st.columns([0.6, 1, 1, 1, 1, 1])
+                head_c[0].markdown("**组**")
+                head_c[1].markdown("**孔位**（可多选）")
+                head_c[2].markdown("**主SLM组合**")
+                head_c[3].markdown("**SLM添加剂**（可多选+比例）")
+                head_c[4].markdown("**异常标签**")
+                head_c[5].markdown("**异常孔位**（可选）")
+                for g in res2.groups:
+                    row_c = st.columns([0.6, 1, 1, 1, 1, 1])
+                    row_c[0].markdown(f"**M{g}**")
+                    quick_add["well_positions"][g] = row_c[1].multiselect(
+                        f"M{g} 孔位（可多选，下拉选择）", _all_wells,
+                        default=[], key=f"qa_{g}_well",
+                        placeholder="下拉选 A1~H12，重复几个选几个")
+                    # 主SLM组合（多选+比例，默认继承基准）
+                    _slm_main_opts_g = [o for o in slm_main_opts if o != "（无）"]
+                    _g_slm_sel = row_c[2].multiselect(
+                        f"M{g} 主SLM组合（可多选）", _slm_main_opts_g,
+                        default=[x for x in base_slm_sel if x in _slm_main_opts_g], key=f"qa_{g}_slmmain",
+                        placeholder="留空=继承基准", format_func=_reagent_fmt,
+                        accept_new_options=True)
+                    _register_custom_reagent(_g_slm_sel)
+                    _g_slm_entries = []
+                    if _g_slm_sel and _g_slm_sel != base_slm_sel:
+                        if len(_g_slm_sel) > 1:
+                            _g_pcts = row_c[2].columns(len(_g_slm_sel))
+                            for i_, nm_ in enumerate(_g_slm_sel):
+                                _p_ = _g_pcts[i_].number_input(f"M{g}·{nm_} %", value=round(100.0/len(_g_slm_sel), 1),
+                                                               step=1.0, key=f"qa_{g}_slmp_{i_}",
+                                                               label_visibility="collapsed")
+                                _g_slm_entries.append(f"{nm_} ({_p_:g}%)")
+                        else:
+                            _g_slm_entries = list(_g_slm_sel)
+                    quick_add.setdefault("slm_main_combo", {})[g] = _g_slm_entries
+                    # SLM添加剂（多选+比例）
+                    quick_add["slm_additives"][g] = row_c[3].multiselect(
+                        f"M{g} SLM添加剂（可多选，含SLM表全部物质）", slm_add_opts,
+                        default=[x for x in (R._strip_ratio(v) for v in (base.get("slm_additives") or [])) if x in slm_add_opts],
+                        key=f"qa_{g}_slm", accept_new_options=True, placeholder="可下拉选或输入",
+                        format_func=_reagent_fmt)
+                    _register_custom_reagent(quick_add["slm_additives"][g])
+                    if quick_add["slm_additives"][g]:
+                        _sa_pct = row_c[3].columns(len(quick_add["slm_additives"][g]))
+                        _sa_ent = []
+                        for i_, nm_ in enumerate(quick_add["slm_additives"][g]):
+                            _nm_clean, _p_def = R.split_name_ratio(nm_)
+                            if _p_def is None:
+                                _p_def = _base_ratio_map(base.get("slm_additives")).get(_nm_clean)
+                            try:
+                                _p_num = float(str(_p_def).replace("%", "")) if _p_def is not None else 5.0
+                            except ValueError:
+                                _p_num = 5.0
+                            _p_ = _sa_pct[i_].number_input(f"M{g}·{_nm_clean} 含量%",
+                                                           value=_p_num,
+                                                           step=0.5, key=f"qa_{g}_sap_{i_}", label_visibility="collapsed")
+                            _sa_ent.append(f"{_nm_clean} ({_p_:g}%)")
+                        quick_add["slm_additives"][g] = _sa_ent
+                    quick_add["note_tags"][g] = row_c[4].multiselect(
+                        f"M{g} 异常标签（可多选）", note_tags_opts,
+                        default=[], key=f"qa_{g}_tags", accept_new_options=True,
+                        placeholder="渗漏/烧焦/破裂…")
+                    # 异常孔位选项联动：已填孔位 → 只显示那些孔；未填 → 全部96孔
+                    _abw_opts = quick_add["well_positions"].get(g) or _all_wells
+                    quick_add["abnormal_wells"][g] = row_c[5].multiselect(
+                        f"M{g} 异常孔位（可选）", _abw_opts,
+                        default=[], key=f"qa_{g}_abw",
+                        help="只在部分电极棒/孔发生异常时才需要填；空=该组使用的孔位全部视为异常")
+            if _exp_key in ("donor", "all"):
+                with st.expander("展开点选各组供体相添加剂（可多选+含量，补充表格单选列；all模式用）", expanded=False):
+                    quick_add["donor_additives"] = {}
+                    for g in res2.groups:
+                        _don_sel = st.multiselect(
+                            f"M{g} 供体相添加剂（可多选，含SLM表全部物质）", phase_add_opts,
+                            default=[x for x in (R._strip_ratio(v) for v in (base.get("donor_additives") or [])) if x in phase_add_opts],
+                            key=f"qa_{g}_don", accept_new_options=True, placeholder="可下拉选或输入",
                             format_func=_reagent_fmt)
-                        _register_custom_reagent(gc[field])
-                        if with_content and gc[field]:
-                            # 含量/浓度输入（与快速表格一致）：SLM添加剂=数字%；
-                            # 供体/受体相=自由单位文本框
-                            _p_cols = col[oc_idx].columns(len(gc[field]))
-                            _ent = []
-                            for _i_, _nm_ in enumerate(gc[field]):
-                                _clean_, _p_def_ = R.split_name_ratio(_nm_)
-                                if _p_def_ is None:
-                                    _p_def_ = _base_ratio_map(base_val).get(_clean_)
-                                if unit_free:
-                                    _p_ = _p_cols[_i_].text_input(
-                                        f"{_clean_} 含量/浓度", key=f"g{g}_{field}_pct_{_i_}",
-                                        value=str(_p_def_) if _p_def_ else "",
-                                        placeholder="5% / 10 mM",
-                                        label_visibility="collapsed").strip()
-                                    _ent.append(f"{_clean_} ({_p_})" if _p_ else _clean_)
-                                else:
-                                    try:
-                                        _p_num = float(str(_p_def_).replace("%", "")) if _p_def_ is not None else 5.0
-                                    except ValueError:
-                                        _p_num = 5.0
-                                    _p_ = _p_cols[_i_].number_input(
-                                        f"{_clean_} 含量%", value=_p_num, step=0.5,
-                                        key=f"g{g}_{field}_pct_{_i_}", label_visibility="collapsed")
-                                    _ent.append(f"{_clean_} ({_p_:g}%)")
-                            gc[field] = _ent
+                        _register_custom_reagent(_don_sel)
+                        if _don_sel:
+                            _don_pct = st.columns(len(_don_sel))
+                            _don_ent = []
+                            for i_, nm_ in enumerate(_don_sel):
+                                _nm_clean, _p_def = R.split_name_ratio(nm_)
+                                if _p_def is None:
+                                    _p_def = _base_ratio_map(base.get("donor_additives")).get(_nm_clean)
+                                _p_ = _don_pct[i_].text_input(
+                                    f"M{g}·供体·{_nm_clean} 含量/浓度", key=f"qa_{g}_donp_{i_}",
+                                    value=str(_p_def) if _p_def else "",
+                                    placeholder="5% / 10 mM", label_visibility="collapsed").strip()
+                                _don_ent.append(f"{_nm_clean} ({_p_})" if _p_ else _nm_clean)
+                            quick_add["donor_additives"][g] = _don_ent
+                        else:
+                            quick_add["donor_additives"][g] = []
+            if _exp_key in ("acceptor", "all"):
+                with st.expander("展开点选各组受体相添加剂（可多选+含量，补充表格单选列；all模式用）", expanded=False):
+                    quick_add["acceptor_additives"] = {}
+                    for g in res2.groups:
+                        _acc_sel = st.multiselect(
+                            f"M{g} 受体相添加剂（可多选，含SLM表全部物质）", phase_add_opts,
+                            default=[x for x in (R._strip_ratio(v) for v in (base.get("acceptor_additives") or [])) if x in phase_add_opts],
+                            key=f"qa_{g}_acc", accept_new_options=True, placeholder="可下拉选或输入",
+                            format_func=_reagent_fmt)
+                        _register_custom_reagent(_acc_sel)
+                        if _acc_sel:
+                            _acc_pct = st.columns(len(_acc_sel))
+                            _acc_ent = []
+                            for i_, nm_ in enumerate(_acc_sel):
+                                _nm_clean, _p_def = R.split_name_ratio(nm_)
+                                if _p_def is None:
+                                    _p_def = _base_ratio_map(base.get("acceptor_additives")).get(_nm_clean)
+                                _p_ = _acc_pct[i_].text_input(
+                                    f"M{g}·受体·{_nm_clean} 含量/浓度", key=f"qa_{g}_accp_{i_}",
+                                    value=str(_p_def) if _p_def else "",
+                                    placeholder="5% / 10 mM", label_visibility="collapsed").strip()
+                                _acc_ent.append(f"{_nm_clean} ({_p_})" if _p_ else _nm_clean)
+                            quick_add["acceptor_additives"][g] = _acc_ent
+                        else:
+                            quick_add["acceptor_additives"][g] = []
+            for g in res2.groups:
+                _row_key = f"M{g}"
+                # 「组」索引列可编辑：用户改了组名时 _edited 不含 M{g}，退回构建值防 KeyError 崩页
+                r = _edited.loc[_row_key] if _row_key in _edited.index else _tbl.loc[_row_key]
+                gc = {}
+                # 本组的自动填入行（每组各自取，不得用上一循环残留值）
+                _r_af = _af_map.get(int(g))
+                # 与基准比较：不同则覆盖
+                # 标准品组合：保留逐组详细模式中的选择；无详细状态时保留数据库已存组合
+                # （否则老实验在快速表格模式下重新生成会把各组组合清成默认）
+                _gc_det_qc = _det_map.get(int(g)) if _apply_det else None
+                _af_qc = str(_r_af.get("qc_combo")) if _r_af is not None and _r_af.get("qc_combo") else ""
+                gc["qc_combo"] = (str(_gc_det_qc.get("qc_combo")) if _gc_det_qc is not None and _gc_det_qc.get("qc_combo")
+                                  else _af_qc)
+                _lbl_raw = r["组别名(留空自动)"]
+                lbl = "" if pd.isna(_lbl_raw) else str(_lbl_raw).strip()
+                if lbl in ("None", "nan"):
+                    lbl = ""
+                gc["group_label"] = lbl if lbl else None
+                _g_combo = quick_add.get("slm_main_combo", {}).get(g) or []
+                if _g_combo:
+                    gc["slm_main"] = " + ".join(_g_combo) if len(_g_combo) > 1 else _g_combo[0]
+                else:
+                    # NaN/空单元格 = 未改动 → 继承基准（NaN 会存成 NULL 或 "nan" 标签）
+                    _slm_cell = "" if pd.isna(r["主SLM"]) else str(r["主SLM"]).strip()
+                    if _slm_cell and _slm_cell != str(base["slm_main"]):
+                        gc["slm_main"] = _slm_cell
                     else:
-                        gc[field] = list(base_val)
-                def _ov_select(col, oc_idx, field, label, base_val):
-                    if col[oc_idx].checkbox(f"覆盖{label}", key=f"g{g}_ov_{field}"):
-                        v = col[oc_idx].selectbox(label, slm_main_opts, index=base_idx, key=f"g{g}_{field}",
-                                                  format_func=_reagent_fmt)
-                        gc[field] = "" if v == "（无）" else v
+                        gc["slm_main"] = base["slm_main"]
+
+                def _num_cell(_v, _base_v):
+                    try:
+                        if pd.isna(_v):
+                            return _base_v
+                    except (TypeError, ValueError):
+                        return _base_v
+                    return float(_v) if float(_v) != float(_base_v) else _base_v
+
+                gc["pH_donor"] = _num_cell(r["供体相pH"], base["pH_donor"])
+                gc["pH_acceptor"] = _num_cell(r["受体相pH"], base["pH_acceptor"])
+                gc["extract_time"] = _num_cell(r["萃取时间(分钟)"], base["extract_time"])
+                gc["extract_voltage"] = _num_cell(r["萃取电压(V)"], base["extract_voltage"])
+                gc["slm_additives"] = list(quick_add["slm_additives"].get(g) or [])
+                # donor/acceptor 动态列
+                if _exp_key in ("donor", "all"):
+                    gc["donor_composition"] = str(r["供体相成分"]) if str(r["供体相成分"]) != str(base.get("donor_composition")) else base.get("donor_composition")
+                    gc["donor_buffer_conc"] = str(r["供体相缓冲剂浓度"]) if str(r["供体相缓冲剂浓度"]) != str(base.get("donor_buffer_conc") or "") else base.get("donor_buffer_conc")
+                    tbl_add = str(r["供体相添加剂"])
+                    # 优先级：表格单元格改动 > 展开点选改动（基准为空时也生效）> 显式清空 > 继承基准
+                    _base_list = list(base.get("donor_additives") or [])
+                    _base_da0 = R._strip_ratio(_base_list[0]) if _base_list else ""
+                    _, _base_da0_content = R.split_name_ratio(_base_list[0]) if _base_list else ("", None)
+                    _base_da0_content = str(_base_da0_content or "")
+                    ms_list = list(quick_add.get("donor_additives", {}).get(g) or [])
+                    _ms_changed = [R._strip_ratio(x) for x in ms_list] != [R._strip_ratio(x) for x in _base_list]
+                    _tbl_content = str(r.get("供体相含量") or "").strip()
+                    if tbl_add not in ("（无）", "", "None") and tbl_add != _base_da0:
+                        gc["donor_additives"] = [f"{tbl_add} ({_tbl_content})" if _tbl_content else tbl_add]
+                    elif (tbl_add == _base_da0 and _tbl_content
+                          and _tbl_content != _base_da0_content):
+                        # 名称同基准但含量改了 → 覆盖
+                        gc["donor_additives"] = [f"{tbl_add} ({_tbl_content})"]
+                    elif _ms_changed:
+                        gc["donor_additives"] = ms_list
+                    elif tbl_add in ("（无）", "", "None"):
+                        gc["donor_additives"] = []
                     else:
-                        gc[field] = base_val
-
-                st.caption("SLM")
-                oc = st.columns(4)
-                _ov_select(oc, 0, "slm_main", "主SLM", base["slm_main"])
-                _ov_multi(oc, 1, "slm_additives", "SLM添加剂", base["slm_additives"],
-                          with_content=True, unit_free=False)
-
-                st.caption("供体相")
-                ocd = st.columns(4)
-                _ov_num(ocd, 0, "pH_donor", "供体相pH", base["pH_donor"], 0.1)
-                _ov_multi(ocd, 1, "donor_additives", "供体相添加剂", base["donor_additives"],
-                          opts=phase_add_opts, opts_label="供体相添加剂（可选SLM表全部物质）",
-                          with_content=True, unit_free=True)
-                _ov_text(ocd, 2, "donor_composition", "供体相成分", base["donor_composition"])
-                _ov_text(ocd, 3, "donor_buffer_conc", "供体相缓冲剂浓度", base["donor_buffer_conc"])
-                ocd2 = st.columns(2)
-
-                st.caption("受体相")
-                oca = st.columns(4)
-                _ov_num(oca, 0, "pH_acceptor", "受体相pH", base["pH_acceptor"], 0.1)
-                _ov_multi(oca, 1, "acceptor_additives", "受体相添加剂", base["acceptor_additives"],
-                          opts=phase_add_opts, opts_label="受体相添加剂（可选SLM表全部物质）",
-                          with_content=True, unit_free=True)
-                _ov_text(oca, 2, "acceptor_composition", "受体相成分", base["acceptor_composition"])
-                _ov_text(oca, 3, "acceptor_buffer_conc", "受体相缓冲剂浓度", base["acceptor_buffer_conc"])
-                oca2 = st.columns(2)
-
-                st.caption("萃取条件")
-                oce = st.columns(2)
-                _ov_num(oce, 0, "extract_time", "萃取时间", base["extract_time"], 1.0)
-                _ov_num(oce, 1, "extract_voltage", "萃取电压", base["extract_voltage"], 5.0)
-
-                st.caption("备注 / 异常标签 / 孔位（重复用多个孔，孔位可多选）")
-                nb_c = st.columns(2)
-                _well_list = [f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)]
-                gc["note_tags"] = nb_c[0].multiselect(
-                    f"M{g} 异常标签", S.get_note_tags(),
-                    default=[], key=f"g{g}_tags", accept_new_options=True,
-                    placeholder="渗漏/烧焦/破裂…")
-                gc["well_position"] = nb_c[1].multiselect(
-                    f"M{g} 孔位(96孔板,可多选)", _well_list,
-                    default=[], key=f"g{g}_well", accept_new_options=True,
-                    placeholder="该组使用的孔，如 A1、A2、A3")
-                nb2_c = st.columns(2)
-                gc["abnormal_wells"] = nb2_c[0].multiselect(
-                    f"M{g} 异常孔位(可选)", _well_list,
-                    default=[], key=f"g{g}_abw",
-                    help="只在部分电极棒/孔异常时填；空=该组全部孔位视为异常")
-                gc["group_note"] = nb2_c[1].text_input(f"M{g} 备注(手动)", value="", key=f"g{g}_note")
-
+                        gc["donor_additives"] = ms_list if ms_list else _base_list
+                if _exp_key in ("acceptor", "all"):
+                    gc["acceptor_composition"] = str(r["受体相成分"]) if str(r["受体相成分"]) != str(base.get("acceptor_composition")) else base.get("acceptor_composition")
+                    gc["acceptor_buffer_conc"] = str(r["受体相缓冲剂浓度"]) if str(r["受体相缓冲剂浓度"]) != str(base.get("acceptor_buffer_conc") or "") else base.get("acceptor_buffer_conc")
+                    tbl_add_a = str(r["受体相添加剂"])
+                    # 与供体相同规则：表格改动 > 展开点选改动 > 显式清空 > 继承基准
+                    _base_list_a = list(base.get("acceptor_additives") or [])
+                    _base_aa0 = R._strip_ratio(_base_list_a[0]) if _base_list_a else ""
+                    _, _base_aa0_content = R.split_name_ratio(_base_list_a[0]) if _base_list_a else ("", None)
+                    _base_aa0_content = str(_base_aa0_content or "")
+                    ms_list_a = list(quick_add.get("acceptor_additives", {}).get(g) or [])
+                    _ms_changed_a = [R._strip_ratio(x) for x in ms_list_a] != [R._strip_ratio(x) for x in _base_list_a]
+                    _tbl_content_a = str(r.get("受体相含量") or "").strip()
+                    if tbl_add_a not in ("（无）", "", "None") and tbl_add_a != _base_aa0:
+                        gc["acceptor_additives"] = [f"{tbl_add_a} ({_tbl_content_a})" if _tbl_content_a else tbl_add_a]
+                    elif (tbl_add_a == _base_aa0 and _tbl_content_a
+                          and _tbl_content_a != _base_aa0_content):
+                        gc["acceptor_additives"] = [f"{tbl_add_a} ({_tbl_content_a})"]
+                    elif _ms_changed_a:
+                        gc["acceptor_additives"] = ms_list_a
+                    elif tbl_add_a in ("（无）", "", "None"):
+                        gc["acceptor_additives"] = []
+                    else:
+                        gc["acceptor_additives"] = ms_list_a if ms_list_a else _base_list_a
+                # 备注（手动文本 + 异常标签 + 孔位 + 异常孔位）
+                gc["group_note"] = str(r["备注(手动输入)"]).strip()
+                gc["note_tags"] = list(quick_add["note_tags"].get(g) or [])
+                gc["well_position"] = json.dumps(
+                    list(quick_add.get("well_positions", {}).get(g) or []), ensure_ascii=False)
+                gc["abnormal_wells"] = json.dumps(
+                    list(quick_add.get("abnormal_wells", {}).get(g) or []), ensure_ascii=False)
+                # 兜底：非 donor/acceptor 目的时动态列不存在，组级字段必须继承基准（否则存 None）
+                for k in ["donor_composition", "donor_buffer_conc", "donor_additive_conc",
+                          "donor_additives", "acceptor_composition", "acceptor_buffer_conc",
+                          "acceptor_additive_conc", "acceptor_additives"]:
+                    if k not in gc or gc[k] is None:
+                        v = base.get(k)
+                        gc[k] = list(v) if isinstance(v, list) else v
                 group_full[g] = gc
-        st.session_state["_ne_detail_state"] = {"folder": sel, "group_full": group_full}
-        st.session_state["_ne_last_group_mode"] = "🔧 逐组详细设置（含添加剂/备注）"
-
-    # ---- 生成 ----
-    st.subheader("5) 生成")
-    if st.button("✅ 生成 Excel + 写入数据库", type="primary"):
-        conn = get_db()
-        # 质控名以下拉当前值为准：与解析覆盖不一致时重解析，保证指标/Excel 与保存的 qc_names 一致
-        if dict(qc_names) != (_qc_override or {}):
-            st.session_state[f"ne_qc_override_{sel}"] = dict(qc_names)
-            res3 = _cached_parse(sel, json.dumps(_qc_for_parse, ensure_ascii=False),
-                                 _eff_fmt or "", _folder_sig(sel))
+            st.session_state["_ne_quick_state"] = {"folder": sel, "group_full": group_full}
+            st.session_state["_ne_last_group_mode"] = "📋 表格快速设置（推荐）"
         else:
-            res3 = st.session_state["cur_res"]
-        # 重新生成已有实验时套用已保存的剔除记录（样本+标准品针），避免被悄悄还原
-        _pre_row = conn.execute("SELECT id FROM experiments WHERE folder=?", (sel,)).fetchone()
-        _saved_excl_re = M.get_excluded_samples(conn, int(_pre_row["id"])) if _pre_row else set()
-        _saved_std_re = M.get_excluded_std(conn, int(_pre_row["id"])) if _pre_row else {}
-        if _saved_std_re:
-            _drop_re = set().union(*_saved_std_re.values())
-            if _drop_re:
-                # 用副本承载过滤结果：不得原地改 cur_res——步骤6 需要完整标准品针列表
-                # （预勾选已剔除针供取消），原地过滤会让旧剔除在确认时被误清
-                import dataclasses as _dc
-                _mask_re = res3.df.apply(
-                    lambda r_: (str(r_["sample"]), int(r_["injection_idx"])) in _drop_re, axis=1)
-                res3 = _dc.replace(res3, df=res3.df[~_mask_re].copy())
-        # 多标准品组合：各组 QC 配置（提交时从组条件构建；解析已保留全部标准品行）
-        _combos_for_calc = qc_combos if (_multi_qc and qc_combos) else []
-        _gqc_submit = {}
-        for _g_, _gc_ in group_full.items():
-            _cn_ = _gc_.get("qc_combo")
-            if _cn_:
-                _c_ = next((c for c in _combos_for_calc if c.get("name") == _cn_), None)
-                if _c_:
-                    _gqc_submit[int(_g_)] = {k: _c_.get(k) for k, _ in QC_ROLES}
-        _default_qc_submit = ({k: (v[0] if isinstance(v, list) else v) for k, v in _qc_for_parse.items()}
-                              if isinstance(_qc_for_parse.get("std_acceptor"), list) else dict(qc_names))
-        metrics = C.compute_metrics(res3.df, res3.analytes, res3.groups,
-                                    meta["Va"], meta["Vd"], use_sample=bool(meta["use_sample"]),
-                                    excluded_samples=_saved_excl_re,
-                                    group_qc=_gqc_submit, default_qc=_default_qc_submit)
-        data_xlsx = folder / f"{meta['exp_date'] or res3.file_date}-DATA.xlsx"
-        exp_data = {
-            "folder": sel, "exp_date": meta["exp_date"],
-            "temperature": meta["temperature"], "humidity": meta["humidity"],
-            "column_pressure": meta["column_pressure"],
-            "Va": meta["Va"], "Vd": meta["Vd"],
-            "use_sample": meta["use_sample"], "qc_names": json.dumps(_qc_for_parse, ensure_ascii=False),
-            "exp_type": exp_type["key"], "purpose": meta["purpose"],
-            "sample_format": _eff_fmt,
-            "qc_combos": json.dumps(qc_combos, ensure_ascii=False) if (_multi_qc and qc_combos) else None,
-            "current_sheets": json.dumps(st.session_state.get("ne_current_sheets") or [], ensure_ascii=False),
-            "n_groups": len(res3.groups), "n_replicates": res3.n_replicates,
-            "data_xlsx": str(data_xlsx),
-        }
-        eid = M.upsert_experiment(conn, exp_data)
-        M.save_metrics(conn, eid, meta["exp_date"], metrics, res3.analytes, res3.groups)
-        M.save_qc_summary(conn, eid, meta["exp_date"], res3, res3.analytes,
-                          default_qc=_default_qc_submit)
-        M.save_rt_records(conn, eid, meta["exp_date"], res3)
-        def _ser(v):
-            return json.dumps(v, ensure_ascii=False) if isinstance(v, list) else v
-        base_serial = {**base, "group_label": "基准条件"}
-        for k in ["slm_additives", "donor_additives", "acceptor_additives", "note_tags",
-                  "well_position", "abnormal_wells"]:
-            base_serial[k] = _ser(base_serial.get(k, []))
-        gc_serial = {}
-        _fallback_groups = []  # 自动命名退回 M组号 的组（缺 SLM 信息），生成后提示
-        for g, c in group_full.items():
-            gc_serial[g] = {**c}
+            # 各组覆盖
+            st.markdown("**各组条件**（勾选「覆盖」才会修改该字段；组别名默认自动生成）")
+            res2 = st.session_state["cur_res"]
+            group_full = {}
+            base_idx = slm_main_opts.index(base["slm_main"]) if base["slm_main"] in slm_main_opts else 0
+            # 双向同步：上一轮是快速表格 → 逐组控件按快速表格的有效设置预置
+            _quick_state = st.session_state.get("_ne_quick_state") or {}
+            _quick_gf = _quick_state.get("group_full") if _quick_state.get("folder") == sel else None
+            _apply_quick = st.session_state.get("_ne_last_group_mode") == "📋 表格快速设置（推荐）"
+
+            for g in res2.groups:
+                with st.expander(f"M{g}", expanded=(g <= 3)):
+                    gc = {}
+                    # —— 从快速表格同步（仅模式切换后的第一轮；之后不再覆写用户在详细模式的改动）——
+                    if _apply_quick and _quick_gf and int(g) in _quick_gf:
+                        _qgc = _quick_gf[int(g)]
+                        for _f_ in ["pH_donor", "pH_acceptor", "extract_time", "extract_voltage"]:
+                            try:
+                                _v_ = float(_qgc.get(_f_))
+                                _bv_ = float(base.get(_f_))
+                            except (TypeError, ValueError):
+                                continue
+                            if abs(_v_ - _bv_) > 1e-9:
+                                st.session_state[f"g{g}_ov_{_f_}"] = True
+                                st.session_state[f"g{g}_{_f_}"] = _v_
+                        for _f_ in ["donor_composition", "donor_buffer_conc",
+                                    "acceptor_composition", "acceptor_buffer_conc"]:
+                            _v_ = str(_qgc.get(_f_) or "")
+                            _bv_ = str(base.get(_f_) or "")
+                            if _v_ and _v_ != _bv_:
+                                st.session_state[f"g{g}_ov_{_f_}"] = True
+                                st.session_state[f"g{g}_{_f_}"] = _v_
+                        for _f_, _cf_ in [("slm_additives", None), ("donor_additives", "供体相含量"),
+                                          ("acceptor_additives", "受体相含量")]:
+                            _v_list = [R._strip_ratio(x) for x in _as_name_list(_qgc.get(_f_))]
+                            _bv_list = [R._strip_ratio(x) for x in _as_name_list(base.get(_f_))]
+                            if _v_list and _v_list != _bv_list:
+                                st.session_state[f"g{g}_ov_{_f_}"] = True
+                                _seed_list = list(_v_list)
+                                # 含量列的文本并入第一个添加剂（保留用户在快速表格填的单位）
+                                if _cf_ and _seed_list:
+                                    _ct = str(_qgc.get(_cf_) or "").strip()
+                                    if _ct:
+                                        _seed_list[0] = f"{_seed_list[0]} ({_ct})"
+                                st.session_state[f"g{g}_{_f_}"] = _seed_list
+                        if _qgc.get("slm_main") and str(_qgc["slm_main"]) != str(base.get("slm_main")):
+                            _slm_v_ = R._strip_ratio(str(_qgc["slm_main"]))
+                            if _slm_v_ in slm_main_opts:
+                                st.session_state[f"g{g}_ov_slm_main"] = True
+                                st.session_state[f"g{g}_slm_main"] = _slm_v_
+                        if _qgc.get("group_label"):
+                            st.session_state[f"g{g}_ov_label"] = True
+                            st.session_state[f"g{g}_label"] = str(_qgc["group_label"])
+                        if _qgc.get("well_position"):
+                            st.session_state[f"g{g}_well"] = M.parse_wells(_qgc["well_position"])
+                        if _qgc.get("abnormal_wells"):
+                            st.session_state[f"g{g}_abw"] = M.parse_wells(_qgc["abnormal_wells"])
+                        if _qgc.get("note_tags"):
+                            st.session_state[f"g{g}_tags"] = list(_qgc["note_tags"])
+                        if _qgc.get("group_note"):
+                            st.session_state[f"g{g}_note"] = str(_qgc["group_note"])
+                        if _qgc.get("qc_combo"):
+                            st.session_state[f"g{g}_qc_combo"] = str(_qgc["qc_combo"])
+
+                    # 标准品组合（多标准品模式：该组回收率/转移率基于所选组合计算）
+                    _combos_avail = st.session_state.get("ne_qc_combos") or []
+                    if st.session_state.get("ne_multi_qc") and _combos_avail:
+                        _combo_names = [c.get("name") for c in _combos_avail]
+                        gc["qc_combo"] = st.selectbox(
+                            f"M{g} 标准品组合（供受体相质控）",
+                            ["（默认组合）"] + _combo_names,
+                            key=f"g{g}_qc_combo",
+                            help="该组的回收率/转移率/三相分布将基于所选组合的标准品与空白计算")
+                        if gc["qc_combo"] == "（默认组合）":
+                            gc["qc_combo"] = ""  # 存空串（默认），不存字面量
+                    else:
+                        gc["qc_combo"] = ""
+                    # 组别名：自动生成（只读显示，避免 Streamlit widget state 干扰）；
+                    # 勾选"手动指定"才出现输入框
+                    gc_manual_override = st.checkbox(f"M{g} 手动指定组别名", key=f"g{g}_ov_label")
+                    if gc_manual_override:
+                        # 基于基准预填一个默认，用户可改
+                        auto_prefill = N.generate_group_label(exp_type["key"],
+                            slm_main=base["slm_main"], slm_additives=base["slm_additives"],
+                            pH_donor=base["pH_donor"], donor_additives=base["donor_additives"],
+                            pH_acceptor=base["pH_acceptor"], acceptor_additives=base["acceptor_additives"],
+                            extract_time=base["extract_time"], extract_voltage=base["extract_voltage"],
+                            donor_composition=base.get("donor_composition") or "",
+                            acceptor_composition=base.get("acceptor_composition") or "")
+                        custom_label = st.text_input(f"M{g} 组别名", value=auto_prefill or f"M{g}", key=f"g{g}_label")
+                        gc["group_label"] = custom_label
+                    else:
+                        # 自动生成：提交时按实际条件生成（此处占位，提交逻辑处理）
+                        gc["group_label"] = None  # None = 自动
+                        st.caption("组别名将在提交时按该组实际条件自动生成")
+
+                    # 通用：覆盖文本字段助手
+                    def _ov_text(col, oc_idx, field, label, base_val):
+                        if col[oc_idx].checkbox(f"覆盖{label}", key=f"g{g}_ov_{field}"):
+                            gc[field] = col[oc_idx].text_input(label, value=str(base_val or ""), key=f"g{g}_{field}")
+                        else:
+                            gc[field] = base_val
+                    def _ov_num(col, oc_idx, field, label, base_val, step):
+                        if col[oc_idx].checkbox(f"覆盖{label}", key=f"g{g}_ov_{field}"):
+                            gc[field] = col[oc_idx].number_input(label, value=float(base_val), step=step, key=f"g{g}_{field}")
+                        else:
+                            gc[field] = base_val
+                    def _ov_multi(col, oc_idx, field, label, base_val, opts=None, opts_label=None,
+                                  with_content=False, unit_free=False):
+                        _opts = opts if opts is not None else slm_add_opts
+                        if _opts and col[oc_idx].checkbox(f"覆盖{label}", key=f"g{g}_ov_{field}"):
+                            gc[field] = col[oc_idx].multiselect(
+                                opts_label or label, _opts,
+                                default=[x for x in (R._strip_ratio(v) for v in (base_val or []))
+                                         if x in _opts or _opts is slm_add_opts and R._strip_ratio(x) in _opts],
+                                key=f"g{g}_{field}", accept_new_options=True,
+                                format_func=_reagent_fmt)
+                            _register_custom_reagent(gc[field])
+                            if with_content and gc[field]:
+                                # 含量/浓度输入（与快速表格一致）：SLM添加剂=数字%；
+                                # 供体/受体相=自由单位文本框
+                                _p_cols = col[oc_idx].columns(len(gc[field]))
+                                _ent = []
+                                for _i_, _nm_ in enumerate(gc[field]):
+                                    _clean_, _p_def_ = R.split_name_ratio(_nm_)
+                                    if _p_def_ is None:
+                                        _p_def_ = _base_ratio_map(base_val).get(_clean_)
+                                    if unit_free:
+                                        _p_ = _p_cols[_i_].text_input(
+                                            f"{_clean_} 含量/浓度", key=f"g{g}_{field}_pct_{_i_}",
+                                            value=str(_p_def_) if _p_def_ else "",
+                                            placeholder="5% / 10 mM",
+                                            label_visibility="collapsed").strip()
+                                        _ent.append(f"{_clean_} ({_p_})" if _p_ else _clean_)
+                                    else:
+                                        try:
+                                            _p_num = float(str(_p_def_).replace("%", "")) if _p_def_ is not None else 5.0
+                                        except ValueError:
+                                            _p_num = 5.0
+                                        _p_ = _p_cols[_i_].number_input(
+                                            f"{_clean_} 含量%", value=_p_num, step=0.5,
+                                            key=f"g{g}_{field}_pct_{_i_}", label_visibility="collapsed")
+                                        _ent.append(f"{_clean_} ({_p_:g}%)")
+                                gc[field] = _ent
+                        else:
+                            gc[field] = list(base_val)
+                    def _ov_select(col, oc_idx, field, label, base_val):
+                        if col[oc_idx].checkbox(f"覆盖{label}", key=f"g{g}_ov_{field}"):
+                            v = col[oc_idx].selectbox(label, slm_main_opts, index=base_idx, key=f"g{g}_{field}",
+                                                      format_func=_reagent_fmt)
+                            gc[field] = "" if v == "（无）" else v
+                        else:
+                            gc[field] = base_val
+
+                    st.caption("SLM")
+                    oc = st.columns(4)
+                    _ov_select(oc, 0, "slm_main", "主SLM", base["slm_main"])
+                    _ov_multi(oc, 1, "slm_additives", "SLM添加剂", base["slm_additives"],
+                              with_content=True, unit_free=False)
+
+                    st.caption("供体相")
+                    ocd = st.columns(4)
+                    _ov_num(ocd, 0, "pH_donor", "供体相pH", base["pH_donor"], 0.1)
+                    _ov_multi(ocd, 1, "donor_additives", "供体相添加剂", base["donor_additives"],
+                              opts=phase_add_opts, opts_label="供体相添加剂（可选SLM表全部物质）",
+                              with_content=True, unit_free=True)
+                    _ov_text(ocd, 2, "donor_composition", "供体相成分", base["donor_composition"])
+                    _ov_text(ocd, 3, "donor_buffer_conc", "供体相缓冲剂浓度", base["donor_buffer_conc"])
+                    ocd2 = st.columns(2)
+
+                    st.caption("受体相")
+                    oca = st.columns(4)
+                    _ov_num(oca, 0, "pH_acceptor", "受体相pH", base["pH_acceptor"], 0.1)
+                    _ov_multi(oca, 1, "acceptor_additives", "受体相添加剂", base["acceptor_additives"],
+                              opts=phase_add_opts, opts_label="受体相添加剂（可选SLM表全部物质）",
+                              with_content=True, unit_free=True)
+                    _ov_text(oca, 2, "acceptor_composition", "受体相成分", base["acceptor_composition"])
+                    _ov_text(oca, 3, "acceptor_buffer_conc", "受体相缓冲剂浓度", base["acceptor_buffer_conc"])
+                    oca2 = st.columns(2)
+
+                    st.caption("萃取条件")
+                    oce = st.columns(2)
+                    _ov_num(oce, 0, "extract_time", "萃取时间", base["extract_time"], 1.0)
+                    _ov_num(oce, 1, "extract_voltage", "萃取电压", base["extract_voltage"], 5.0)
+
+                    st.caption("备注 / 异常标签 / 孔位（重复用多个孔，孔位可多选）")
+                    nb_c = st.columns(2)
+                    _well_list = [f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)]
+                    gc["note_tags"] = nb_c[0].multiselect(
+                        f"M{g} 异常标签", S.get_note_tags(),
+                        default=[], key=f"g{g}_tags", accept_new_options=True,
+                        placeholder="渗漏/烧焦/破裂…")
+                    gc["well_position"] = nb_c[1].multiselect(
+                        f"M{g} 孔位(96孔板,可多选)", _well_list,
+                        default=[], key=f"g{g}_well", accept_new_options=True,
+                        placeholder="该组使用的孔，如 A1、A2、A3")
+                    nb2_c = st.columns(2)
+                    gc["abnormal_wells"] = nb2_c[0].multiselect(
+                        f"M{g} 异常孔位(可选)", _well_list,
+                        default=[], key=f"g{g}_abw",
+                        help="只在部分电极棒/孔异常时填；空=该组全部孔位视为异常")
+                    gc["group_note"] = nb2_c[1].text_input(f"M{g} 备注(手动)", value="", key=f"g{g}_note")
+
+                    group_full[g] = gc
+            st.session_state["_ne_detail_state"] = {"folder": sel, "group_full": group_full}
+            st.session_state["_ne_last_group_mode"] = "🔧 逐组详细设置（含添加剂/备注）"
+
+        # ---- 生成 ----
+    with st.expander("5) 生成", expanded=(st.session_state.get("ne_step") == "5 生成")):
+        if st.button("✅ 生成 Excel + 写入数据库", type="primary"):
+            conn = get_db()
+            # 质控名以下拉当前值为准：与解析覆盖不一致时重解析，保证指标/Excel 与保存的 qc_names 一致
+            if dict(qc_names) != (_qc_override or {}):
+                st.session_state[f"ne_qc_override_{sel}"] = dict(qc_names)
+                res3 = _cached_parse(sel, json.dumps(_qc_for_parse, ensure_ascii=False),
+                                     _eff_fmt or "", _folder_sig(sel))
+            else:
+                res3 = st.session_state["cur_res"]
+            # 重新生成已有实验时套用已保存的剔除记录（样本+标准品针），避免被悄悄还原
+            _pre_row = conn.execute("SELECT id FROM experiments WHERE folder=?", (sel,)).fetchone()
+            _saved_excl_re = M.get_excluded_samples(conn, int(_pre_row["id"])) if _pre_row else set()
+            _saved_std_re = M.get_excluded_std(conn, int(_pre_row["id"])) if _pre_row else {}
+            if _saved_std_re:
+                _drop_re = set().union(*_saved_std_re.values())
+                if _drop_re:
+                    # 用副本承载过滤结果：不得原地改 cur_res——步骤6 需要完整标准品针列表
+                    # （预勾选已剔除针供取消），原地过滤会让旧剔除在确认时被误清
+                    import dataclasses as _dc
+                    _mask_re = res3.df.apply(
+                        lambda r_: (str(r_["sample"]), int(r_["injection_idx"])) in _drop_re, axis=1)
+                    res3 = _dc.replace(res3, df=res3.df[~_mask_re].copy())
+            # 多标准品组合：各组 QC 配置（提交时从组条件构建；解析已保留全部标准品行）
+            _combos_for_calc = qc_combos if (_multi_qc and qc_combos) else []
+            _gqc_submit = {}
+            for _g_, _gc_ in group_full.items():
+                _cn_ = _gc_.get("qc_combo")
+                if _cn_:
+                    _c_ = next((c for c in _combos_for_calc if c.get("name") == _cn_), None)
+                    if _c_:
+                        _gqc_submit[int(_g_)] = {k: _c_.get(k) for k, _ in QC_ROLES}
+            _default_qc_submit = ({k: (v[0] if isinstance(v, list) else v) for k, v in _qc_for_parse.items()}
+                                  if isinstance(_qc_for_parse.get("std_acceptor"), list) else dict(qc_names))
+            metrics = C.compute_metrics(res3.df, res3.analytes, res3.groups,
+                                        meta["Va"], meta["Vd"], use_sample=bool(meta["use_sample"]),
+                                        excluded_samples=_saved_excl_re,
+                                        group_qc=_gqc_submit, default_qc=_default_qc_submit)
+            data_xlsx = folder / f"{meta['exp_date'] or res3.file_date}-DATA.xlsx"
+            exp_data = {
+                "folder": sel, "exp_date": meta["exp_date"],
+                "temperature": meta["temperature"], "humidity": meta["humidity"],
+                "column_pressure": meta["column_pressure"],
+                "Va": meta["Va"], "Vd": meta["Vd"],
+                "use_sample": meta["use_sample"], "qc_names": json.dumps(_qc_for_parse, ensure_ascii=False),
+                "exp_type": exp_type["key"], "purpose": meta["purpose"],
+                "sample_format": _eff_fmt,
+                "qc_combos": json.dumps(qc_combos, ensure_ascii=False) if (_multi_qc and qc_combos) else None,
+                "current_sheets": json.dumps(st.session_state.get("ne_current_sheets") or [], ensure_ascii=False),
+                "n_groups": len(res3.groups), "n_replicates": res3.n_replicates,
+                "data_xlsx": str(data_xlsx),
+            }
+            eid = M.upsert_experiment(conn, exp_data)
+            M.save_metrics(conn, eid, meta["exp_date"], metrics, res3.analytes, res3.groups)
+            M.save_qc_summary(conn, eid, meta["exp_date"], res3, res3.analytes,
+                              default_qc=_default_qc_submit)
+            M.save_rt_records(conn, eid, meta["exp_date"], res3)
+            def _ser(v):
+                return json.dumps(v, ensure_ascii=False) if isinstance(v, list) else v
+            base_serial = {**base, "group_label": "基准条件"}
             for k in ["slm_additives", "donor_additives", "acceptor_additives", "note_tags",
                       "well_position", "abnormal_wells"]:
-                gc_serial[g][k] = _ser(gc_serial[g].get(k, []))
-            # 组别名：None=自动 → 按该组实际条件生成；否则用户手动指定
-            cur_label = c.get("group_label")
-            if cur_label is None or str(cur_label).strip() == "":
-                regen = N.generate_group_label(exp_type["key"],
-                    slm_main=gc_serial[g].get("slm_main"), slm_additives=c.get("slm_additives"),
-                    pH_donor=c.get("pH_donor"), donor_additives=c.get("donor_additives"),
-                    pH_acceptor=c.get("pH_acceptor"), acceptor_additives=c.get("acceptor_additives"),
-                    extract_time=c.get("extract_time"), extract_voltage=c.get("extract_voltage"),
-                    donor_composition=c.get("donor_composition") or "",
-                    acceptor_composition=c.get("acceptor_composition") or "")
-                gc_serial[g]["group_label"] = regen or f"M{g}"
-                if not regen:
-                    _fallback_groups.append(g)
-            else:
-                gc_serial[g]["group_label"] = cur_label
-        M.save_group_conditions(conn, eid, base_serial, gc_serial)
-        # 构建电压表数据：把选中的电流 sheet 数据同步写入 DATA.xlsx（全部选中记录都写入）
-        voltage_df = build_voltage_df(st.session_state.get("ne_current_sheets") or [])
-        EB.build_excel(data_xlsx, res3, meta, meta["Va"], meta["Vd"], bool(meta["use_sample"]),
-                       voltage_df=voltage_df,
-                       gcond=M.get_group_conditions(conn, eid),
-                       excluded_samples=_saved_excl_re,
-                       qc_by_group=_gqc_submit, default_qc=_default_qc_submit)
-        n_pts = len(voltage_df) if voltage_df is not None else 0
-        # 生成成功（含 Excel 落盘）后才清编辑备份：若 build_excel 抛异常（如 xlsx 被占用），
-        # 用户原地重试时表格编辑仍在，不会被迫重填
-        st.session_state.pop("_ne_qtbl_edits", None)
-        st.session_state.pop("_ne_qtbl_edits_sig", None)
-        st.success(f"✅ 完成！Excel：`{data_xlsx}`  实验ID：{eid}"
-                   + (f"（电压表已写入 {n_pts} 点电流数据；组条件已同步）" if n_pts else "（组条件已同步）"))
-        if _fallback_groups and exp_type.get("key") in N.EXP_TYPE_PREFIX:
-            st.warning(
-                "⚠️ 组 " + "、".join(f"M{g}" for g in _fallback_groups)
-                + " 没有可用的 SLM/膜组成信息，组别名只能用 M组号。"
-                "请在「基准条件」或各组设置里填好 SLM 后重新生成本文件夹（组别名会自动补全），"
-                "或到「实验详情→修改/删除」手动填写组别名。")
-        # 标记进入标准品剔除步骤
-        st.session_state["_std_check_eid"] = eid
-        st.session_state["_std_check_folder"] = sel
+                base_serial[k] = _ser(base_serial.get(k, []))
+            gc_serial = {}
+            _fallback_groups = []  # 自动命名退回 M组号 的组（缺 SLM 信息），生成后提示
+            for g, c in group_full.items():
+                gc_serial[g] = {**c}
+                for k in ["slm_additives", "donor_additives", "acceptor_additives", "note_tags",
+                          "well_position", "abnormal_wells"]:
+                    gc_serial[g][k] = _ser(gc_serial[g].get(k, []))
+                # 组别名：None=自动 → 按该组实际条件生成；否则用户手动指定
+                cur_label = c.get("group_label")
+                if cur_label is None or str(cur_label).strip() == "":
+                    regen = N.generate_group_label(exp_type["key"],
+                        slm_main=gc_serial[g].get("slm_main"), slm_additives=c.get("slm_additives"),
+                        pH_donor=c.get("pH_donor"), donor_additives=c.get("donor_additives"),
+                        pH_acceptor=c.get("pH_acceptor"), acceptor_additives=c.get("acceptor_additives"),
+                        extract_time=c.get("extract_time"), extract_voltage=c.get("extract_voltage"),
+                        donor_composition=c.get("donor_composition") or "",
+                        acceptor_composition=c.get("acceptor_composition") or "")
+                    gc_serial[g]["group_label"] = regen or f"M{g}"
+                    if not regen:
+                        _fallback_groups.append(g)
+                else:
+                    gc_serial[g]["group_label"] = cur_label
+            M.save_group_conditions(conn, eid, base_serial, gc_serial)
+            # 构建电压表数据：把选中的电流 sheet 数据同步写入 DATA.xlsx（全部选中记录都写入）
+            voltage_df = build_voltage_df(st.session_state.get("ne_current_sheets") or [])
+            EB.build_excel(data_xlsx, res3, meta, meta["Va"], meta["Vd"], bool(meta["use_sample"]),
+                           voltage_df=voltage_df,
+                           gcond=M.get_group_conditions(conn, eid),
+                           excluded_samples=_saved_excl_re,
+                           qc_by_group=_gqc_submit, default_qc=_default_qc_submit)
+            n_pts = len(voltage_df) if voltage_df is not None else 0
+            # 生成成功（含 Excel 落盘）后才清编辑备份：若 build_excel 抛异常（如 xlsx 被占用），
+            # 用户原地重试时表格编辑仍在，不会被迫重填
+            st.session_state.pop("_ne_qtbl_edits", None)
+            st.session_state.pop("_ne_qtbl_edits_sig", None)
+            st.success(f"✅ 完成！Excel：`{data_xlsx}`  实验ID：{eid}"
+                       + (f"（电压表已写入 {n_pts} 点电流数据；组条件已同步）" if n_pts else "（组条件已同步）"))
+            if _fallback_groups and exp_type.get("key") in N.EXP_TYPE_PREFIX:
+                st.warning(
+                    "⚠️ 组 " + "、".join(f"M{g}" for g in _fallback_groups)
+                    + " 没有可用的 SLM/膜组成信息，组别名只能用 M组号。"
+                    "请在「基准条件」或各组设置里填好 SLM 后重新生成本文件夹（组别名会自动补全），"
+                    "或到「实验详情→修改/删除」手动填写组别名。")
+            # 标记进入标准品剔除步骤
+            st.session_state["_std_check_eid"] = eid
+            st.session_state["_std_check_folder"] = sel
 
+        if st.button("▶ 录入下一个文件夹", key="ne_next_folder"):
+            st.session_state.pop("_ne_loaded_folder", None)
+            st.session_state["ne_step_req"] = _NE_STEPS[0]
+            st.rerun()
     # —— 6) 标准品剔除步骤（生成后；仅对刚生成的那个文件夹显示）——
     if st.session_state.get("_std_check_folder") != sel:
         st.session_state.pop("_std_check_eid", None)
     std_eid = st.session_state.get("_std_check_eid")
     if std_eid is not None:
-        st.subheader("6) 标准品质量检查（可选）")
-        conn = get_db()
-        qc_df = pd.read_sql("SELECT * FROM qc_summary WHERE experiment_id=?", conn, params=(std_eid,))
-        res_chk = st.session_state.get("cur_res")
-        exp_row = conn.execute("SELECT data_xlsx, Va, Vd, use_sample, exp_date, qc_names, current_sheets, sample_format, qc_combos, temperature, humidity, column_pressure, purpose FROM experiments WHERE id=?",
-                               (std_eid,)).fetchone()
-        if len(qc_df) and res_chk is not None and exp_row:
-            def _hl_rsd(v):
-                if pd.isna(v): return ""
-                try:
-                    return "background-color: #ffc7ce; color: #9C0006" if float(v) > 15.0 else ""
-                except (ValueError, TypeError):
-                    return ""
-
-            # 标准品剔除：受体相 / 供体相 两套矩阵分别勾选（支持两相不同标准品环境）
-            _std_link = st.checkbox(
-                "同一标准品名在两相都使用时联动剔除（勾选 A-STD 第 i 针，另一相的 A-STD 第 i 针同剔；不同名标准品互不影响）",
-                value=True, key="std_link_new",
-                help="两相用同一标准品系列（同名或同批次对应针）时勾选；只需在一处勾选，两相同号针一起剔除。")
-            _needles_by_phase = {}
-            _std_names_by_phase = {}
-            # 已保存的标准品针剔除（预勾选，取消勾选即恢复；否则二次保存会清掉旧剔除）
-            _saved_std_step6 = M.get_excluded_std(conn, std_eid)
-            _saved_needles_step6 = {f"{s} #{i}" for pairs in _saved_std_step6.values() for s, i in pairs}
-            for phase_cat, phase_name in [("std_acceptor", "受体相标准品"), ("std_donor", "供体相标准品")]:
-                _std_names_by_phase[phase_cat] = sorted(
-                    res_chk.df[res_chk.df["category"] == phase_cat]["sample"].unique())
-                if not _std_names_by_phase[phase_cat]:
-                    st.caption(f"（{phase_name}：数据中无对应进样行）")
-                    continue
-                st.markdown(f"**{phase_name}**（按标准品名分节剔除；剔除某针后，所有使用该标准品的组同时生效）")
-                _needles_by_phase.setdefault(phase_cat, [])
-                # —— 每个标准品名独立一节：独立矩阵/独立偏离度推荐（不同溶液峰面积不可混算）——
-                for _nm in _std_names_by_phase[phase_cat]:
-                    _df_nm = res_chk.df[(res_chk.df["category"] == phase_cat)
-                                        & (res_chk.df["sample"] == _nm)]
-                    std_mat_p = C.get_std_injection_matrix(_df_nm, phase_cat, res_chk.analytes)
-                    if not len(std_mat_p):
-                        continue
-                    with st.expander(f"📌 {_nm}（{len(std_mat_p)} 针）",
-                                     expanded=(_nm == _std_names_by_phase[phase_cat][0])):
-                        row_sum_p = std_mat_p.sum(axis=1)
-                        mean_p = row_sum_p.mean()
-                        dev_p = (row_sum_p - mean_p).abs() / (abs(mean_p) if mean_p else 1)
-                        worst_p = dev_p.idxmax()
-                        st.warning(f"🔴 推荐剔除（偏离最大）：**{worst_p}**（偏离度 {dev_p.max():.3f}）")
-                        # 合并表：进样针（索引，冻结）+ 剔除复选框（冻结）+ 峰面积总和/偏离度/各物质（只读）
-                        _m_p = std_mat_p.copy()
-                        _m_p.insert(0, "峰面积总和", row_sum_p)
-                        _m_p.insert(1, "偏离度", dev_p.round(3))
-                        _m_p.insert(0, "剔除", [n in _saved_needles_step6 for n in std_mat_p.index])
-                        _num_cols_p = [c for c in _m_p.columns if c != "剔除"]
-                        _ed_p = st.data_editor(
-                            _m_p,
-                            key=f"std_ed3_{phase_cat}_{_nm}", hide_index=False,
-                            column_config={
-                                "剔除": st.column_config.CheckboxColumn("剔除", default=False, pinned=True),
-                                "峰面积总和": st.column_config.NumberColumn(format="%.3e"),
-                                "偏离度": st.column_config.NumberColumn(format="%.3f"),
-                                **{c: st.column_config.NumberColumn(format="%.3e") for c in std_mat_p.columns}},
-                            disabled=_num_cols_p)
-                        _needles_by_phase[phase_cat].extend(
-                            n for n in _ed_p.index[_ed_p["剔除"]].tolist() if n in std_mat_p.index)  # 防误改索引文字
-
-            # 合并两相剔除对（同系列联动：按针号对应扩展到另一相）
-            _pairs_by_phase_raw = {}
-            for phase_cat, needles in _needles_by_phase.items():
-                _pp = []
-                for needle in needles:
-                    if isinstance(needle, str) and " #" in needle:
-                        sname, num = needle.rsplit(" #", 1)
-                        _pp.append((sname, int(num)))
-                _pairs_by_phase_raw[phase_cat] = _pp
-            _pairs_by_phase = _expand_std_link(_pairs_by_phase_raw, _std_names_by_phase) if _std_link else _pairs_by_phase_raw
-            excl_pairs = [(s, i) for pairs in _pairs_by_phase.values() for s, i in pairs]
-            excl_needles = [f"{s_} #{n_}" for s_, n_ in excl_pairs]
-
-            # —— 实时 RSD 预览：按标准品名分别显示剔除前/后 RSD（不再跨溶液混算）——
-            st.markdown("**各物质·各标准品 RSD（勾选剔除后实时更新）**（红色=RSD>15%）")
-            _rsd_prev_frames = []
-            for phase_cat, phase_label in [("std_acceptor", "受体"), ("std_donor", "供体")]:
-                for _nm in _std_names_by_phase.get(phase_cat, []):
-                    _excl_nm = {(s, i) for (s, i) in excl_pairs if s == _nm}
-                    _df_b = res_chk.df[(res_chk.df["category"] == phase_cat)
-                                       & (res_chk.df["sample"] == _nm)]
-                    if not len(_df_b):
-                        continue
-                    _df_a = _df_b[~_df_b.apply(
-                        lambda r: (r["sample"], int(r["injection_idx"])) in _excl_nm, axis=1)]
-                    _col_b, _col_a = f"{_nm} 剔除前RSD%", f"{_nm} 剔除后RSD%"
-                    _rows_pn = []
-                    for a in res_chk.analytes:
-                        _, r_b, _ = C.aggregate_qc(_df_b, phase_cat, a)
-                        _, r_a, _ = C.aggregate_qc(_df_a, phase_cat, a)
-                        _rows_pn.append({"物质": a,
-                                         _col_b: round(r_b, 2) if r_b is not None else None,
-                                         _col_a: round(r_a, 2) if r_a is not None else None})
-                    _rdf = pd.DataFrame(_rows_pn)
-                    _rdf[f"{_nm} 变化"] = (_rdf[_col_a] - _rdf[_col_b]).round(2)
-                    _rsd_prev_frames.append((f"{phase_label}相 · {_nm}", _rdf))
-            for _sec, _rdf in _rsd_prev_frames:
-                with st.expander(f"{_sec}（{len(_rdf)} 个物质）",
-                                 expanded=len(_rsd_prev_frames) <= 2):
-                    _cols_rsd = [c for c in _rdf.columns if c != "物质"]
-                    _col_after = [c for c in _rdf.columns if "剔除后RSD%" in c][0]
-                    # 实时统计置于 RSD 表之前：勾选即可见总数变化
-                    _n_over = int((_rdf[_col_after] > 15).sum())
-                    _rsd_sum = float(_rdf[_col_after].sum())
-                    st.caption(f"📊 实时统计：剔除后 RSD>15% 的物质 **{_n_over}** 个 | "
-                               f"所有物质剔除后 RSD% 累加 **{_rsd_sum:.1f}**")
-                    st.dataframe(_rdf.style.map(_hl_rsd, subset=_cols_rsd).format(
-                        "{:.2f}", na_rep="-", subset=_cols_rsd),
-                        width="stretch", hide_index=True)
-
-            if excl_needles and st.button("💾 确认剔除并保存到数据库 + DATA.xlsx", type="primary", key="reapply_std"):
-                folder_path = config.EXPERIMENTS_DIR / st.session_state["_std_check_folder"]
-                try:
-                    qc_names_dic = json.loads(exp_row["qc_names"])
-                except Exception:
-                    qc_names_dic = {}
-                try:
-                    _combos_s6 = json.loads(exp_row["qc_combos"]) if exp_row["qc_combos"] else []
-                except Exception:
-                    _combos_s6 = []
-                if _combos_s6:
-                    # 多标准品组合：解析需保留全部组合的标准品/空白行
-                    qc_names_dic = _combos_union_qc(_combos_s6)
-                res_new = _cached_parse(st.session_state["_std_check_folder"],
-                                        json.dumps(qc_names_dic, ensure_ascii=False) if qc_names_dic else "",
-                                        (exp_row["sample_format"] if exp_row else None) or "",
-                                        _folder_sig(st.session_state["_std_check_folder"]))
-                drop_mask = res_new.df.apply(
-                    lambda r: (r["sample"], int(r["injection_idx"])) in excl_pairs, axis=1)
-                res_new.df = res_new.df[~drop_mask].copy()
-                va = float(exp_row["Va"]); vd = float(exp_row["Vd"]); us = bool(exp_row["use_sample"])
-                # 保留此前已保存的样本剔除，避免重算时把已剔除的重复样本加回来
-                _saved_sample_excl = M.get_excluded_samples(conn, std_eid)
-                _gqc_s6, _dqc_s6, _ = _build_group_qc_from_db(conn, std_eid)
-                m_new = C.compute_metrics(res_new.df, res_new.analytes, res_new.groups, va, vd,
-                                          use_sample=us, excluded_samples=_saved_sample_excl,
-                                          group_qc=_gqc_s6, default_qc=_dqc_s6)
-                conn.execute("DELETE FROM metrics WHERE experiment_id=?", (std_eid,))
-                conn.execute("DELETE FROM qc_summary WHERE experiment_id=?", (std_eid,))
-                conn.commit()
-                M.save_metrics(conn, std_eid, exp_row["exp_date"], m_new, res_new.analytes, res_new.groups)
-                M.save_qc_summary(conn, std_eid, exp_row["exp_date"], res_new, res_new.analytes,
-                                  default_qc=_dqc_s6)
-                # 持久化标准品针剔除（按相分开、已含同系列联动扩展）。
-                # 与旧记录合并：本次矩阵中出现并勾选=保留；出现未勾选=恢复；矩阵未出现的旧针=保留
-                _final_std = {}
-                for _pc_ in ("std_acceptor", "std_donor"):
-                    _new_ = set(_pairs_by_phase.get(_pc_) or [])
-                    _old_ = _saved_std_step6.get(_pc_) or set()
-                    _seen_ = {(s, i) for s, i in _old_ if s in _std_names_by_phase.get(_pc_, set())}
-                    _final_std[_pc_] = list(_new_ | (_old_ - _seen_))
-                M.set_excluded_std(conn, std_eid,
-                                   std_acceptor=_final_std.get("std_acceptor"),
-                                   std_donor=_final_std.get("std_donor"))
-                data_xlsx_path = Path(exp_row["data_xlsx"]) if exp_row["data_xlsx"] else None
-                if data_xlsx_path:
+        with st.expander("6) 标准品质量检查（可选）", expanded=(st.session_state.get("ne_step") == "6 标准品检查")):
+            conn = get_db()
+            qc_df = pd.read_sql("SELECT * FROM qc_summary WHERE experiment_id=?", conn, params=(std_eid,))
+            res_chk = st.session_state.get("cur_res")
+            exp_row = conn.execute("SELECT data_xlsx, Va, Vd, use_sample, exp_date, qc_names, current_sheets, sample_format, qc_combos, temperature, humidity, column_pressure, purpose FROM experiments WHERE id=?",
+                                   (std_eid,)).fetchone()
+            if len(qc_df) and res_chk is not None and exp_row:
+                def _hl_rsd(v):
+                    if pd.isna(v): return ""
                     try:
-                        _meta_s6 = {"exp_date": exp_row["exp_date"],
-                                    "temperature": exp_row["temperature"], "humidity": exp_row["humidity"],
-                                    "column_pressure": exp_row["column_pressure"], "purpose": exp_row["purpose"]}
-                        EB.build_excel(data_xlsx_path, res_new, _meta_s6,
-                                       va, vd, us, excluded_samples=_saved_sample_excl,
-                                       gcond=M.get_group_conditions(conn, std_eid),
-                                       qc_by_group=_gqc_s6, default_qc=_dqc_s6,
-                                       voltage_df=build_voltage_df(json.loads(exp_row["current_sheets"]) if exp_row["current_sheets"] else []))
-                    except Exception as _ebe:
-                        st.session_state["_std_saved_msg"] = (
-                            f"⚠️ 数据库已保存，但 DATA.xlsx 生成失败：{_ebe}")
-                # 按联动扩展后的实际剔除对计数（同系列/同名标准品时勾任一相，两相同号针同剔）
-                n_acc = len(_pairs_by_phase.get("std_acceptor") or [])
-                n_don = len(_pairs_by_phase.get("std_donor") or [])
-                st.session_state["_std_saved_msg"] = (
-                    f"✅ 已剔除受体相标准品 {n_acc} 针、供体相标准品 {n_don} 针，**已保存到数据库**"
-                    f"（均值/RSD/回收率已重算），**已重新生成 DATA.xlsx**："
-                    f"`{Path(exp_row['data_xlsx']).name if exp_row['data_xlsx'] else '（无文件）'}`。")
-                st.rerun()
+                        return "background-color: #ffc7ce; color: #9C0006" if float(v) > 15.0 else ""
+                    except (ValueError, TypeError):
+                        return ""
 
-            # rerun 后显示保存成功提示（一次性：显示后即清除，再次交互不再出现）
-            if st.session_state.get("_std_saved_msg"):
-                st.success(st.session_state["_std_saved_msg"])
-                del st.session_state["_std_saved_msg"]
-            # RSD 检查提示（基于 qc_df 最新值）
-            n_high = int((qc_df["std_acceptor_rsd"].fillna(0) > config.RSD_THRESHOLD).sum())
-            if n_high == 0:
-                st.success("✅ 所用物质标准品 RSD 均 ≤ 15%，数据质量良好，无需剔除。")
-            elif n_high > 0:
-                st.warning(f"⚠️ 有 {n_high} 个物质的标准品 RSD > 15%（见上方表格，红色标记），建议剔除异常进样针。")
+                # 标准品剔除：受体相 / 供体相 两套矩阵分别勾选（支持两相不同标准品环境）
+                _std_link = st.checkbox(
+                    "同一标准品名在两相都使用时联动剔除（勾选 A-STD 第 i 针，另一相的 A-STD 第 i 针同剔；不同名标准品互不影响）",
+                    value=True, key="std_link_new",
+                    help="两相用同一标准品系列（同名或同批次对应针）时勾选；只需在一处勾选，两相同号针一起剔除。")
+                _needles_by_phase = {}
+                _std_names_by_phase = {}
+                # 已保存的标准品针剔除（预勾选，取消勾选即恢复；否则二次保存会清掉旧剔除）
+                _saved_std_step6 = M.get_excluded_std(conn, std_eid)
+                _saved_needles_step6 = {f"{s} #{i}" for pairs in _saved_std_step6.values() for s, i in pairs}
+                # —— 自动剔除（标准品针）：仅预勾选，不自动保存 ——
+                _auto_std_key = f"_auto_std_plan_{std_eid}"
+                _sc_cols = st.columns([1, 1, 5])
+                if _sc_cols[0].button("🪄 保守剔除（标准品）", key="auto_std_conservative"):
+                    _blocks = {}
+                    for _pc in ("std_acceptor", "std_donor"):
+                        for _nm2 in _std_names_by_phase[phase_cat]:
+                            _df_nm2 = res_chk.df[(res_chk.df["category"] == _pc)
+                                                 & (res_chk.df["sample"] == _nm2)]
+                            _mat2 = C.get_std_injection_matrix(_df_nm2, _pc, res_chk.analytes)
+                            if len(_mat2) >= 3:
+                                _units2 = {idx: {a: (float(v) if pd.notna(v) else None)
+                                                 for a, v in row.items()}
+                                           for idx, row in _mat2.iterrows()}
+                                _blocks[(_pc, _nm2)] = {"units": _units2,
+                                                        "floor": max(2, min(5, len(_mat2) - 1))}
+                    _plan = C.plan_auto_exclusion(_blocks, {"default": 2}, mode="conservative",
+                                                  min_n_gain=1, min_rsd_rel=0.05)
+                    st.session_state[_auto_std_key] = _plan["excluded"]
+                    st.session_state[f"_auto_std_card_{std_eid}"] = _plan
+                    st.rerun()
+                if _sc_cols[1].button("🪄 激进剔除（标准品）", key="auto_std_aggressive"):
+                    _blocks = {}
+                    for _pc in ("std_acceptor", "std_donor"):
+                        for _nm2 in _std_names_by_phase[phase_cat]:
+                            _df_nm2 = res_chk.df[(res_chk.df["category"] == _pc)
+                                                 & (res_chk.df["sample"] == _nm2)]
+                            _mat2 = C.get_std_injection_matrix(_df_nm2, _pc, res_chk.analytes)
+                            if len(_mat2) >= 3:
+                                _units2 = {idx: {a: (float(v) if pd.notna(v) else None)
+                                                 for a, v in row.items()}
+                                           for idx, row in _mat2.iterrows()}
+                                _blocks[(_pc, _nm2)] = {"units": _units2,
+                                                        "floor": max(2, min(5, len(_mat2) - 1))}
+                    _plan = C.plan_auto_exclusion(_blocks, {"default": 2}, mode="aggressive",
+                                                  min_n_gain=1, min_rsd_rel=0.05)
+                    st.session_state[_auto_std_key] = _plan["excluded"]
+                    st.session_state[f"_auto_std_card_{std_eid}"] = _plan
+                    st.rerun()
+                _sc_cols[2].caption("标准品剔除按名全局生效（影响所有使用该名的组）。保守=只剔1针且需Q达标+明显改善；激进=到下限或无改进即停。")
+                _auto_std_plan = st.session_state.get(_auto_std_key) or {}
+                _auto_std_labels = set()
+                for (_pc, _nm), _lst in _auto_std_plan.items():
+                    _auto_std_labels |= set(_lst)
+                _auto_std_card = st.session_state.get(f"_auto_std_card_{std_eid}")
+                if _auto_std_card:
+                    with st.expander("🪄 自动剔除建议明细（尚未保存，核对后点下方按钮）", expanded=True):
+                        for _bk, _names in _auto_std_card["excluded"].items():
+                            if _names:
+                                _pc2, _nm2 = _bk
+                                _ph_cn = "受体相" if _pc2 == "std_acceptor" else "供体相"
+                                st.caption(f"{_ph_cn}标准品「{_nm2}」：建议剔除 {', '.join(sorted(_names))}")
+                        _bn = sum(v[0] for v in _auto_std_card["before"].values())
+                        _an = sum(v[0] for v in _auto_std_card["after"].values())
+                        _bs = sum(v[1] for v in _auto_std_card["before"].values())
+                        _as_ = sum(v[1] for v in _auto_std_card["after"].values())
+                        st.caption(f"超阈物质总数 {_bn} → {_an}；RSD% 累加 {_bs:.1f} → {_as_:.1f}（标准品自身口径）")
+                        if _auto_std_card.get("blocked"):
+                            st.caption("被 Q 检验拦下：" + "、".join(sorted({b["unit"] for b in _auto_std_card["blocked"]})))
+                        if st.button("✖ 清除自动建议（标准品）", key="auto_std_clear"):
+                            st.session_state.pop(_auto_std_key, None)
+                            st.session_state.pop(f"_auto_std_card_{std_eid}", None)
+                            st.rerun()
+                for phase_cat, phase_name in [("std_acceptor", "受体相标准品"), ("std_donor", "供体相标准品")]:
+                    _std_names_by_phase[phase_cat] = sorted(
+                        res_chk.df[res_chk.df["category"] == phase_cat]["sample"].unique())
+                    if not _std_names_by_phase[phase_cat]:
+                        st.caption(f"（{phase_name}：数据中无对应进样行）")
+                        continue
+                    st.markdown(f"**{phase_name}**（按标准品名分节剔除；剔除某针后，所有使用该标准品的组同时生效）")
+                    _needles_by_phase.setdefault(phase_cat, [])
+                    # —— 每个标准品名独立一节：独立矩阵/独立偏离度推荐（不同溶液峰面积不可混算）——
+                    for _nm in _std_names_by_phase[phase_cat]:
+                        _df_nm = res_chk.df[(res_chk.df["category"] == phase_cat)
+                                            & (res_chk.df["sample"] == _nm)]
+                        std_mat_p = C.get_std_injection_matrix(_df_nm, phase_cat, res_chk.analytes)
+                        if not len(std_mat_p):
+                            continue
+                        with st.expander(f"📌 {_nm}（{len(std_mat_p)} 针）",
+                                         expanded=(_nm == _std_names_by_phase[phase_cat][0])):
+                            row_sum_p = std_mat_p.sum(axis=1)
+                            mean_p = row_sum_p.mean()
+                            dev_p = (row_sum_p - mean_p).abs() / (abs(mean_p) if mean_p else 1)
+                            worst_p = dev_p.idxmax()
+                            st.warning(f"🔴 推荐剔除（偏离最大）：**{worst_p}**（偏离度 {dev_p.max():.3f}）")
+                            # 合并表：进样针（索引，冻结）+ 剔除复选框（冻结）+ 峰面积总和/偏离度/各物质（只读）
+                            _m_p = std_mat_p.copy()
+                            _m_p.insert(0, "峰面积总和", row_sum_p)
+                            _m_p.insert(1, "偏离度", dev_p.round(3))
+                            _m_p.insert(0, "剔除",
+                                        [n in (_saved_needles_step6 | _auto_std_labels) for n in std_mat_p.index])
+                            _num_cols_p = [c for c in _m_p.columns if c != "剔除"]
+                            _ed_p = st.data_editor(
+                                _m_p,
+                                key=f"std_ed3_{phase_cat}_{_nm}", hide_index=False,
+                                column_config={
+                                    "剔除": st.column_config.CheckboxColumn("剔除", default=False, pinned=True),
+                                    "峰面积总和": st.column_config.NumberColumn(format="%.3e"),
+                                    "偏离度": st.column_config.NumberColumn(format="%.3f"),
+                                    **{c: st.column_config.NumberColumn(format="%.3e") for c in std_mat_p.columns}},
+                                disabled=_num_cols_p)
+                            _needles_by_phase[phase_cat].extend(
+                                n for n in _ed_p.index[_ed_p["剔除"]].tolist() if n in std_mat_p.index)  # 防误改索引文字
+
+                # 合并两相剔除对（同系列联动：按针号对应扩展到另一相）
+                _pairs_by_phase_raw = {}
+                for phase_cat, needles in _needles_by_phase.items():
+                    _pp = []
+                    for needle in needles:
+                        if isinstance(needle, str) and " #" in needle:
+                            sname, num = needle.rsplit(" #", 1)
+                            _pp.append((sname, int(num)))
+                    _pairs_by_phase_raw[phase_cat] = _pp
+                _pairs_by_phase = _expand_std_link(_pairs_by_phase_raw, _std_names_by_phase) if _std_link else _pairs_by_phase_raw
+                excl_pairs = [(s, i) for pairs in _pairs_by_phase.values() for s, i in pairs]
+                excl_needles = [f"{s_} #{n_}" for s_, n_ in excl_pairs]
+
+                # —— 实时 RSD 预览：按标准品名分别显示剔除前/后 RSD（不再跨溶液混算）——
+                st.markdown("**各物质·各标准品 RSD（勾选剔除后实时更新）**（红色=RSD>15%）")
+                _rsd_prev_frames = []
+                for phase_cat, phase_label in [("std_acceptor", "受体"), ("std_donor", "供体")]:
+                    for _nm in _std_names_by_phase.get(phase_cat, []):
+                        _excl_nm = {(s, i) for (s, i) in excl_pairs if s == _nm}
+                        _df_b = res_chk.df[(res_chk.df["category"] == phase_cat)
+                                           & (res_chk.df["sample"] == _nm)]
+                        if not len(_df_b):
+                            continue
+                        _df_a = _df_b[~_df_b.apply(
+                            lambda r: (r["sample"], int(r["injection_idx"])) in _excl_nm, axis=1)]
+                        _col_b, _col_a = f"{_nm} 剔除前RSD%", f"{_nm} 剔除后RSD%"
+                        _rows_pn = []
+                        for a in res_chk.analytes:
+                            _, r_b, _ = C.aggregate_qc(_df_b, phase_cat, a)
+                            _, r_a, _ = C.aggregate_qc(_df_a, phase_cat, a)
+                            _rows_pn.append({"物质": a,
+                                             _col_b: round(r_b, 2) if r_b is not None else None,
+                                             _col_a: round(r_a, 2) if r_a is not None else None})
+                        _rdf = pd.DataFrame(_rows_pn)
+                        _rdf[f"{_nm} 变化"] = (_rdf[_col_a] - _rdf[_col_b]).round(2)
+                        _rsd_prev_frames.append((f"{phase_label}相 · {_nm}", _rdf))
+                for _sec, _rdf in _rsd_prev_frames:
+                    with st.expander(f"{_sec}（{len(_rdf)} 个物质）",
+                                     expanded=len(_rsd_prev_frames) <= 2):
+                        _cols_rsd = [c for c in _rdf.columns if c != "物质"]
+                        _col_after = [c for c in _rdf.columns if "剔除后RSD%" in c][0]
+                        # 实时统计置于 RSD 表之前：勾选即可见总数变化
+                        _n_over = int((_rdf[_col_after] > 15).sum())
+                        _rsd_sum = float(_rdf[_col_after].sum())
+                        st.caption(f"📊 实时统计：剔除后 RSD>15% 的物质 **{_n_over}** 个 | "
+                                   f"所有物质剔除后 RSD% 累加 **{_rsd_sum:.1f}**")
+                        st.dataframe(_rdf.style.map(_hl_rsd, subset=_cols_rsd).format(
+                            "{:.2f}", na_rep="-", subset=_cols_rsd),
+                            width="stretch", hide_index=True)
+
+                if excl_needles and st.button("💾 确认剔除并保存到数据库 + DATA.xlsx", type="primary", key="reapply_std"):
+                    folder_path = config.EXPERIMENTS_DIR / st.session_state["_std_check_folder"]
+                    try:
+                        qc_names_dic = json.loads(exp_row["qc_names"])
+                    except Exception:
+                        qc_names_dic = {}
+                    try:
+                        _combos_s6 = json.loads(exp_row["qc_combos"]) if exp_row["qc_combos"] else []
+                    except Exception:
+                        _combos_s6 = []
+                    if _combos_s6:
+                        # 多标准品组合：解析需保留全部组合的标准品/空白行
+                        qc_names_dic = _combos_union_qc(_combos_s6)
+                    res_new = _cached_parse(st.session_state["_std_check_folder"],
+                                            json.dumps(qc_names_dic, ensure_ascii=False) if qc_names_dic else "",
+                                            (exp_row["sample_format"] if exp_row else None) or "",
+                                            _folder_sig(st.session_state["_std_check_folder"]))
+                    drop_mask = res_new.df.apply(
+                        lambda r: (r["sample"], int(r["injection_idx"])) in excl_pairs, axis=1)
+                    res_new.df = res_new.df[~drop_mask].copy()
+                    va = float(exp_row["Va"]); vd = float(exp_row["Vd"]); us = bool(exp_row["use_sample"])
+                    # 保留此前已保存的样本剔除，避免重算时把已剔除的重复样本加回来
+                    _saved_sample_excl = M.get_excluded_samples(conn, std_eid)
+                    _gqc_s6, _dqc_s6, _ = _build_group_qc_from_db(conn, std_eid)
+                    m_new = C.compute_metrics(res_new.df, res_new.analytes, res_new.groups, va, vd,
+                                              use_sample=us, excluded_samples=_saved_sample_excl,
+                                              group_qc=_gqc_s6, default_qc=_dqc_s6)
+                    conn.execute("DELETE FROM metrics WHERE experiment_id=?", (std_eid,))
+                    conn.execute("DELETE FROM qc_summary WHERE experiment_id=?", (std_eid,))
+                    conn.commit()
+                    M.save_metrics(conn, std_eid, exp_row["exp_date"], m_new, res_new.analytes, res_new.groups)
+                    M.save_qc_summary(conn, std_eid, exp_row["exp_date"], res_new, res_new.analytes,
+                                      default_qc=_dqc_s6)
+                    # 持久化标准品针剔除（按相分开、已含同系列联动扩展）。
+                    # 与旧记录合并：本次矩阵中出现并勾选=保留；出现未勾选=恢复；矩阵未出现的旧针=保留
+                    _final_std = {}
+                    for _pc_ in ("std_acceptor", "std_donor"):
+                        _new_ = set(_pairs_by_phase.get(_pc_) or [])
+                        _old_ = _saved_std_step6.get(_pc_) or set()
+                        _seen_ = {(s, i) for s, i in _old_ if s in _std_names_by_phase.get(_pc_, set())}
+                        _final_std[_pc_] = list(_new_ | (_old_ - _seen_))
+                    M.set_excluded_std(conn, std_eid,
+                                       std_acceptor=_final_std.get("std_acceptor"),
+                                       std_donor=_final_std.get("std_donor"))
+                    data_xlsx_path = Path(exp_row["data_xlsx"]) if exp_row["data_xlsx"] else None
+                    if data_xlsx_path:
+                        try:
+                            _meta_s6 = {"exp_date": exp_row["exp_date"],
+                                        "temperature": exp_row["temperature"], "humidity": exp_row["humidity"],
+                                        "column_pressure": exp_row["column_pressure"], "purpose": exp_row["purpose"]}
+                            EB.build_excel(data_xlsx_path, res_new, _meta_s6,
+                                           va, vd, us, excluded_samples=_saved_sample_excl,
+                                           gcond=M.get_group_conditions(conn, std_eid),
+                                           qc_by_group=_gqc_s6, default_qc=_dqc_s6,
+                                           voltage_df=build_voltage_df(json.loads(exp_row["current_sheets"]) if exp_row["current_sheets"] else []))
+                        except Exception as _ebe:
+                            st.session_state["_std_saved_msg"] = (
+                                f"⚠️ 数据库已保存，但 DATA.xlsx 生成失败：{_ebe}")
+                    # 按联动扩展后的实际剔除对计数（同系列/同名标准品时勾任一相，两相同号针同剔）
+                    n_acc = len(_pairs_by_phase.get("std_acceptor") or [])
+                    n_don = len(_pairs_by_phase.get("std_donor") or [])
+                    st.session_state["_std_saved_msg"] = (
+                        f"✅ 已剔除受体相标准品 {n_acc} 针、供体相标准品 {n_don} 针，**已保存到数据库**"
+                        f"（均值/RSD/回收率已重算），**已重新生成 DATA.xlsx**："
+                        f"`{Path(exp_row['data_xlsx']).name if exp_row['data_xlsx'] else '（无文件）'}`。")
+                    st.rerun()
+
+                # rerun 后显示保存成功提示（一次性：显示后即清除，再次交互不再出现）
+                if st.session_state.get("_std_saved_msg"):
+                    st.success(st.session_state["_std_saved_msg"])
+                    del st.session_state["_std_saved_msg"]
+                # RSD 检查提示（基于 qc_df 最新值）
+                n_high = int((qc_df["std_acceptor_rsd"].fillna(0) > config.RSD_THRESHOLD).sum())
+                if n_high == 0:
+                    st.success("✅ 所用物质标准品 RSD 均 ≤ 15%，数据质量良好，无需剔除。")
+                elif n_high > 0:
+                    st.warning(f"⚠️ 有 {n_high} 个物质的标准品 RSD > 15%（见上方表格，红色标记），建议剔除异常进样针。")
 
 
 # ========================================================
@@ -2008,18 +2096,28 @@ def page_experiment_list():
                 g = int(r["grp"].replace("M", ""))
                 if r["group_label"] in (None, "", "未命名SLM") or "未命名" in str(r["group_label"]):
                     gcond_display.at[i, "group_label"] = group_labels.get(g, f"M{g}")
-    # 异常组着色（有异常标签的行标红）
-    def _has_tags(r):
-        return bool(str(r.get("note_tags", "") or "").strip())
-    if "note_tags" in gcond_display.columns:
-        def _row_style(r):
-            return ["background-color: #ffe0e0"] * len(r) if _has_tags(r) else [""] * len(r)
-        gcond_display = gcond_display.rename(columns={"note_tags": "异常标签", "well_position": "孔位",
-                                                      "group_note": "备注(手动)"})
-        _styled_gcond = gcond_display.style.apply(_row_style, axis=1)
-    else:
-        gcond_display = gcond_display.rename(columns={"well_position": "孔位", "group_note": "备注(手动)"})
-        _styled_gcond = gcond_display.style
+    # 数值列格式化（pH 一位小数、时间/电压整数，避免 2.400000 之类全精度显示）
+    for _c, _f in [("pH_donor", "{:.1f}"), ("pH_acceptor", "{:.1f}"),
+                   ("extract_time", "{:.0f}"), ("extract_voltage", "{:.0f}")]:
+        if _c in gcond_display.columns:
+            gcond_display[_c] = gcond_display[_c].map(
+                lambda v, f=_f: f.format(float(v)) if pd.notna(v) and str(v) != "" else "")
+    # 列名中文化（不再暴露 grp/group_label 等数据库字段名）+ 去内部列
+    _GC_CN = {"grp": "组", "group_label": "组别名", "slm_main": "主SLM", "slm_additives": "SLM添加剂",
+              "pH_donor": "供体相pH", "donor_composition": "供体相成分", "donor_buffer_conc": "供体相缓冲剂浓度",
+              "donor_additives": "供体相添加剂", "pH_acceptor": "受体相pH", "acceptor_composition": "受体相成分",
+              "acceptor_buffer_conc": "受体相缓冲剂浓度", "acceptor_additives": "受体相添加剂",
+              "extract_time": "萃取时间(分钟)", "extract_voltage": "萃取电压(V)",
+              "well_position": "孔位", "note_tags": "异常标签", "abnormal_wells": "异常孔位",
+              "group_note": "备注(手动)", "qc_combo": "标准品组合"}
+    gcond_display = gcond_display.rename(columns=_GC_CN)
+    gcond_display = gcond_display[[c for c in _GC_CN.values() if c in gcond_display.columns]]
+
+    def _row_style(r):
+        # 注意：列已改名，异常标签列名为「异常标签」
+        return ["background-color: #ffe0e0"] * len(r) \
+            if str(r.get("异常标签", "") or "").strip() else [""] * len(r)
+    _styled_gcond = gcond_display.style.apply(_row_style, axis=1)
 
     mdf = pd.read_sql(f"SELECT * FROM metrics WHERE experiment_id={eid}", conn)
     qc_row = pd.read_sql("SELECT * FROM qc_summary WHERE experiment_id=?", conn, params=(eid,))
@@ -2470,7 +2568,10 @@ def page_experiment_list():
         del_folder = st.selectbox("选择删除", _del_opts,
                                   index=_del_opts.index(sel_folder) if sel_folder in _del_opts else 0,
                                   key="del")
-        if st.button("确认删除", type="secondary"):
+        _del_confirm = st.checkbox(
+            f"我确认永久删除「{del_folder}」及其全部指标/分组条件/剔除记录（不可恢复）",
+            key="del_confirm_rec")
+        if st.button("🗑 确认删除（永久）", type="primary", disabled=not _del_confirm, key="del_btn_rec"):
             did = int(exps[exps["folder"] == del_folder]["id"].iloc[0])
             M.delete_experiment(conn, did)
             # 清该文件夹的会话解析缓存（内含旧实验的标准品剔除状态）：同文件夹复录时防止复用
@@ -2551,8 +2652,15 @@ def render_heatmaps(mdf: pd.DataFrame, group_labels: dict, qc_df_row: pd.DataFra
         # —— 独立色标（默认按本指标数据的范围）——
         data_vals = pivot.values.flatten()
         data_vals = data_vals[~pd.isna(data_vals)]
-        dmin = float(np.floor(data_vals.min())) if len(data_vals) else 0.0
-        dmax = float(np.ceil(data_vals.max())) if len(data_vals) else 100.0
+        if ref_kind == "transfer" and len(data_vals) >= 10:
+            # 转移率常被极端异常值拉爆色标：按 5~95 分位截断，越界值以边界色显示
+            dmin = float(np.floor(np.percentile(data_vals, 5)))
+            dmax = float(np.ceil(np.percentile(data_vals, 95)))
+            _n_out = int(((data_vals < dmin) | (data_vals > dmax)).sum())
+        else:
+            dmin = float(np.floor(data_vals.min())) if len(data_vals) else 0.0
+            dmax = float(np.ceil(data_vals.max())) if len(data_vals) else 100.0
+            _n_out = 0
         rc = st.columns([2, 1, 1, 2])
         auto_range = rc[0].checkbox("自动色标范围", value=False, key=f"{kpre}_auto")
         if auto_range:
@@ -2644,7 +2752,13 @@ def render_heatmaps(mdf: pd.DataFrame, group_labels: dict, qc_df_row: pd.DataFra
                                             gmap=pivot.astype(float),
                                             subset=pd.IndexSlice[pivot.index[:n_analytes], :])
         st.dataframe(styled, width="stretch")
-        st.caption(f"颜色范围：{range_desc}（配色 {cmap_use}）。{stat_desc}。统计行白底不参与颜色映射。")
+        _extra_tr = f"，{_n_out} 个越界值以边界色显示" if (ref_kind == "transfer" and _n_out) else ""
+        st.caption(f"颜色范围：{range_desc}{_extra_tr}（配色 {cmap_use}）。{stat_desc}。统计行白底不参与颜色映射。")
+        _dplot = pivot.iloc[:n_analytes].stack()
+        if len(_dplot):
+            _lo_i, _hi_i = _dplot.idxmin(), _dplot.idxmax()
+            st.caption(f"📌 最低：{_lo_i[0]}（{_lo_i[1]}）＝ {_dplot.min():.1f} ｜ "
+                       f"最高：{_hi_i[0]}（{_hi_i[1]}）＝ {_dplot.max():.1f}")
 
     # —— 三个热图后：供体/受体峰面积RSD两个表（>15%标红）——
     st.markdown("---")
@@ -3056,6 +3170,69 @@ def _exclusion_ui(eid, folder, group_labels):
         except Exception:
             continue
 
+    # —— 自动剔除（保守/激进）：仅预勾选，不自动保存 ——
+    _auto_plan_key = f"_auto_smp_plan_{eid}"
+    _ac_cols = st.columns([1, 1, 5])
+    if _ac_cols[0].button("🪄 保守剔除（样本）", key="auto_excl_conservative"):
+        _blocks = {}
+        for g in res.groups:
+            for phase in ("A", "S"):
+                _units, _n0 = {}, 0
+                for r_ in range(1, n_rep + 1):
+                    _sn = _name_map.get((g, phase, r_))
+                    if not _sn:
+                        continue
+                    _n0 += 1
+                    _units[_sn] = {a_: _cell.get((_sn, a_)) for a_ in res.analytes}
+                if _n0 >= 3:
+                    _blocks[(g, phase)] = {"units": _units, "floor": 2}
+        _plan = C.plan_auto_exclusion(_blocks, {"default": 2}, mode="conservative",
+                                      min_n_gain=1, min_rsd_rel=0.05)
+        st.session_state[_auto_plan_key] = _plan["excluded"]
+        st.session_state[f"_auto_smp_card_{eid}"] = _plan
+        st.rerun()
+    if _ac_cols[1].button("🪄 激进剔除（样本）", key="auto_excl_aggressive"):
+        _blocks = {}
+        for g in res.groups:
+            for phase in ("A", "S"):
+                _units, _n0 = {}, 0
+                for r_ in range(1, n_rep + 1):
+                    _sn = _name_map.get((g, phase, r_))
+                    if not _sn:
+                        continue
+                    _n0 += 1
+                    _units[_sn] = {a_: _cell.get((_sn, a_)) for a_ in res.analytes}
+                if _n0 >= 3:
+                    _blocks[(g, phase)] = {"units": _units, "floor": 2}
+        _plan = C.plan_auto_exclusion(_blocks, {"default": 2}, mode="aggressive",
+                                      min_n_gain=1, min_rsd_rel=0.05)
+        st.session_state[_auto_plan_key] = _plan["excluded"]
+        st.session_state[f"_auto_smp_card_{eid}"] = _plan
+        st.rerun()
+    _ac_cols[2].caption("保守=只剔1针且需Q检验达标+明显改善；激进=迭代剔到下限或无改进（Q不达标即停）。仅预勾选，核对后保存。")
+    _auto_plan = st.session_state.get(_auto_plan_key) or {}
+    _auto_card = st.session_state.get(f"_auto_smp_card_{eid}")
+    if _auto_card:
+        with st.expander("🪄 自动剔除建议明细（尚未保存，核对后点下方按钮）", expanded=True):
+            for _bk, _names in _auto_card["excluded"].items():
+                if _names:
+                    _gnum, _ph = _bk
+                    _ph_cn = "受体相" if _ph == "A" else "供体相"
+                    st.caption(f"组{_gnum} {_ph_cn}：建议剔除 {', '.join(sorted(_names))}")
+            _before_n = sum(v[0] for v in _auto_card["before"].values())
+            _after_n = sum(v[0] for v in _auto_card["after"].values())
+            _before_s = sum(v[1] for v in _auto_card["before"].values())
+            _after_s = sum(v[1] for v in _auto_card["after"].values())
+            st.caption(f"超阈物质总数 {_before_n} → {_after_n}；RSD% 累加 {_before_s:.1f} → {_after_s:.1f}")
+            if _auto_card.get("blocked"):
+                st.caption("被 Q 检验拦下（非统计离群，不剔除）："
+                           + "、".join(sorted({b["unit"] for b in _auto_card["blocked"]})))
+            if st.button("✖ 清除自动建议", key="auto_excl_clear"):
+                st.session_state.pop(_auto_plan_key, None)
+                st.session_state.pop(f"_auto_smp_card_{eid}", None)
+                st.rerun()
+
+
     def _stat_pairs(pairs, excl_names):
         """[(样本名, 面积)] → (均值, RSD%)，语义与 calculator.mean/rsd_percent 一致"""
         vals = [float(v) for s_, v in pairs if s_ not in excl_names]
@@ -3080,7 +3257,8 @@ def _exclusion_ui(eid, folder, group_labels):
                 _ed_rows = []
                 for r in range(1, n_rep + 1):
                     sname = _name_map.get((g, phase, r), f"{g}-{phase}-{r}")
-                    _row_e = {"样本": sname, "剔除": sname in _saved_excl_ui}
+                    _row_e = {"样本": sname,
+                              "剔除": sname in (_saved_excl_ui | set(_auto_plan.get((g, phase), [])))}
                     for _a_ in res.analytes:
                         _v = _cell.get((sname, _a_))
                         _row_e[_a_] = float(_v) if _v is not None else np.nan
@@ -3368,17 +3546,32 @@ def _edit_experiment_ui(eid, row, folder):
         _std_excl_saved = M.get_excluded_std(conn, eid)
         _saved_needles = {f"{s} #{i}" for pairs in _std_excl_saved.values() for s, i in pairs}
 
+        _auto_std_labels_ed = set(st.session_state.get(f"_auto_std_plan_ed_{eid}") or [])
+
         def _render_std_editor(mat, keyp):
             row_sum = mat.sum(axis=1)
             mean_sum = row_sum.mean()
             dev = (row_sum - mean_sum).abs() / (abs(mean_sum) if mean_sum else 1)
             worst = dev.idxmax()
             st.warning(f"🔴 推荐剔除（偏离最大）：**{worst}**（偏离度 {dev.max():.3f}）")
+            if st.button("🪄 自动剔除（保守）", key=f"auto_std_ed_{keyp}_{eid}",
+                         help="按 Dixon Q 离群证据自动预勾选一根针；可手动调整"):
+                _units3 = {idx: {a: (float(v) if pd.notna(v) else None) for a, v in row.items()}
+                           for idx, row in mat.iterrows()}
+                _plan3 = C.plan_auto_exclusion({keyp: {"units": _units3, "floor": max(2, min(5, len(mat) - 1))}},
+                                               {"default": 2}, mode="conservative",
+                                               min_n_gain=1, min_rsd_rel=0.05)
+                for _u3 in _plan3["excluded"].get(keyp, []):
+                    if _u3 not in _auto_std_labels_ed:
+                        _auto_std_labels_ed.add(_u3)
+                st.session_state[f"_auto_std_plan_ed_{eid}"] = _auto_std_labels_ed
+                st.rerun()
             # 合并表：进样针（索引，冻结）+ 剔除复选框（冻结）+ 峰面积总和/偏离度/各物质（只读）
             _m_ed = mat.copy()
             _m_ed.insert(0, "峰面积总和", row_sum)
             _m_ed.insert(1, "偏离度", dev.round(3))
-            _m_ed.insert(0, "剔除", [n in _saved_needles for n in mat.index])
+            _m_ed.insert(0, "剔除",
+                         [n in (_saved_needles | _auto_std_labels_ed) for n in mat.index])
             _num_cols_ed = [c for c in _m_ed.columns if c != "剔除"]
             _ed_m = st.data_editor(
                 _m_ed,
@@ -4707,8 +4900,8 @@ def page_calculator():
             v1 = c2v * v_total / c1v
             v_dil = v_total - v1
             r1, r2, r3 = st.columns(3)
-            r1.metric("加入储备液体积", f"{v1:.6g}")
-            r2.metric("加入稀释液体积", f"{v_dil:.6g}")
+            r1.metric("加入储备液体积（与输入同单位）", f"{v1:.6g}")
+            r2.metric("加入稀释液体积（与输入同单位）", f"{v_dil:.6g}")
             r3.metric("总体积", f"{v_total:.6g}")
             if v1 > v_total:
                 st.warning("⚠️ 储备液体积大于总体积：C₂ 高于 C₁，无法稀释（应改为浓缩或降低 C₂）。")
@@ -4833,7 +5026,8 @@ def page_calculator():
                 st.rerun()
             except Exception as e:
                 st.error(f"保存失败：{e}")
-        if c_save2.button("↩️ 恢复内置默认表", key="reagent_reset"):
+        _rt_confirm = st.checkbox("我确认恢复内置试剂表（自定义试剂行将被清除）", key="reagent_reset_confirm")
+        if c_save2.button("↩️ 恢复内置默认表", key="reagent_reset", disabled=not _rt_confirm):
             S.save_reagent_table(S.DEFAULT_REAGENT_TABLE)
             st.session_state.pop("reagent_tbl", None)  # 丢弃编辑器旧控件状态，否则随后保存会把旧值写回
             st.success("已恢复内置默认。"); st.rerun()
@@ -4967,7 +5161,8 @@ def page_settings():
         # 合并保存：只更新本页字段，不清掉配色偏好/参考线/自定义公式/试剂表等其他设置
         S.save_settings({**S.load_settings(), **new_settings})
         st.success("✅ 设置已保存，下次打开软件将使用这些默认值。")
-    if col2.button("↩️ 恢复内置默认"):
+    _reset_confirm = st.checkbox("我确认恢复全部默认参数（当前自定义默认值将被清除）", key="reset_defaults_confirm")
+    if col2.button("↩️ 恢复内置默认", disabled=not _reset_confirm):
         S.reset_settings()
         for _k in S.SETTING_FIELDS:  # 丢弃旧控件状态，否则随后点保存会把旧值写回
             st.session_state.pop(f"set_{_k[0]}", None)
@@ -5226,7 +5421,8 @@ def page_observations():
     with st.expander("🗑 删除记录"):
         _del_idx = st.selectbox("选择要删除的记录", show.index.tolist(),
                                 format_func=lambda i: f"{show.loc[i, '记录时间']} | {str(show.loc[i, '记录内容'])[:40]}（#{int(show.loc[i, 'id'])}）")
-        if st.button("确认删除", type="secondary"):
+        _obs_del_confirm = st.checkbox("我确认删除这条观察记录", key="obs_del_confirm")
+        if st.button("🗑 确认删除", type="secondary", disabled=not _obs_del_confirm):
             M.delete_observation(int(show.loc[_del_idx, "id"]))
             st.session_state["_flash_msg"] = "已删除该条观察记录。"
             st.rerun()
@@ -5234,11 +5430,13 @@ def page_observations():
 
 # ---------- 主导航 ----------
 st.sidebar.title("🧪 EME 实验数据管理")
+PAGES = ["🧪 计算器", "➕ 新增实验", "📋 实验详情", "📈 实验汇总", "📊 质控看板", "🔧 自定义看板",
+         "📝 观察记录", "🧮 公式说明", "🗂️ 信息库", "⚙️ 设置"]
+_qp_page = st.query_params.get("page")
 menu = st.sidebar.radio(
-    "功能导航",
-    ["🧪 计算器", "➕ 新增实验", "📋 实验详情", "📈 实验汇总", "📊 质控看板", "🔧 自定义看板",
-     "📝 观察记录", "🧮 公式说明", "🗂️ 信息库", "⚙️ 设置"],
-    index=0)
+    "功能导航", PAGES,
+    index=PAGES.index(_qp_page) if _qp_page in PAGES else 0)
+st.query_params["page"] = menu  # F5 后停留在当前页
 render_global_observation_sidebar()
 if st.session_state.get("_flash_msg"):
     st.success(st.session_state.pop("_flash_msg"))
