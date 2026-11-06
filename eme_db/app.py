@@ -65,8 +65,6 @@ st.markdown("""
     [data-testid="stAlert"] {border-radius: 10px;}
     /* 辅助文字对比度（实测 3.6~3.7:1 → 提至 ≥4.5:1） */
     [data-testid="stCaptionContainer"] {color: #57585e;}
-    /* 本地工具用不到 Deploy / 运行管理按钮 */
-    [data-testid="stHeader"] [data-testid="stToolbar"] {visibility: hidden; height: 0;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -288,19 +286,20 @@ def page_new_experiment():
     # —— 录入步骤导航（每步聚焦一个决策；其它步骤可手动展开查看，内容不丢失）——
     _NE_STEPS = ["1 选择文件夹", "2 质控样", "3 元数据", "3.5 电流记录", "4 萃取条件", "5 生成", "6 标准品检查"]
     st.session_state.setdefault("ne_step", _NE_STEPS[0])
-    # 上一步/下一步按钮设置"请求键"，在 radio 实例化前预置其控件状态
-    _step_req = st.session_state.pop("ne_step_req", None)
-    if _step_req in _NE_STEPS:
-        st.session_state["ne_step_w"] = _step_req
-        st.session_state["ne_step"] = _step_req
     _si = _NE_STEPS.index(st.session_state["ne_step"]) if st.session_state["ne_step"] in _NE_STEPS else 0
+
+    def _ne_goto(target: str):
+        # on_click 回调先于本轮控件渲染执行——改控件 session_state 的官方可靠方式
+        st.session_state["ne_step_w"] = target
+        st.session_state["ne_step"] = target
+
     _ne_step = st.radio("录入步骤", _NE_STEPS, horizontal=True, index=_si, key="ne_step_w")
     st.session_state["ne_step"] = _ne_step
     _nc_prev, _nc_next, _nc_sp = st.columns([1, 1, 4])
-    if _nc_prev.button("⬅ 上一步", disabled=(_si == 0), key="ne_step_prev"):
-        st.session_state["ne_step_req"] = _NE_STEPS[max(0, _si - 1)]; st.rerun()
-    if _nc_next.button("下一步 ➡", disabled=(_si == len(_NE_STEPS) - 1), key="ne_step_next"):
-        st.session_state["ne_step_req"] = _NE_STEPS[min(len(_NE_STEPS) - 1, _si + 1)]; st.rerun()
+    _nc_prev.button("⬅ 上一步", disabled=(_si == 0), key="ne_step_prev",
+                    on_click=_ne_goto, args=(_NE_STEPS[max(0, _si - 1)],))
+    _nc_next.button("下一步 ➡", disabled=(_si == len(_NE_STEPS) - 1), key="ne_step_next",
+                    on_click=_ne_goto, args=(_NE_STEPS[min(len(_NE_STEPS) - 1, _si + 1)],))
     _nc_sp.caption(f"步骤 {_si + 1}/{len(_NE_STEPS)}——当前步骤已展开；其余步骤内容仍在运行，可手动展开查看。")
     with st.expander("1) 选择实验文件夹", expanded=(st.session_state.get("ne_step") == "1 选择文件夹")):
         exp_root = config.EXPERIMENTS_DIR
@@ -1677,10 +1676,11 @@ def page_new_experiment():
             st.session_state["_std_check_eid"] = eid
             st.session_state["_std_check_folder"] = sel
 
-        if st.button("▶ 录入下一个文件夹", key="ne_next_folder"):
+        def _ne_next_folder_cb():
             st.session_state.pop("_ne_loaded_folder", None)
-            st.session_state["ne_step_req"] = _NE_STEPS[0]
-            st.rerun()
+            st.session_state["ne_step_w"] = _NE_STEPS[0]
+            st.session_state["ne_step"] = _NE_STEPS[0]
+        st.button("▶ 录入下一个文件夹", key="ne_next_folder", on_click=_ne_next_folder_cb)
     # —— 6) 标准品剔除步骤（生成后；仅对刚生成的那个文件夹显示）——
     if st.session_state.get("_std_check_folder") != sel:
         st.session_state.pop("_std_check_eid", None)
