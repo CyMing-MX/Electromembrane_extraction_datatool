@@ -1703,11 +1703,16 @@ def page_new_experiment():
                 _saved_needles_step6 = {f"{s} #{i}" for pairs in _saved_std_step6.values() for s, i in pairs}
                 # —— 自动剔除（标准品针）：仅预勾选，不自动保存 ——
                 _auto_std_key = f"_auto_std_plan_{std_eid}"
-                _sc_cols = st.columns([1, 1, 5])
-                if _sc_cols[0].button("🪄 保守剔除（标准品）", key="auto_std_conservative"):
+                _auto_std_plan = st.session_state.get(_auto_std_key) or {}
+                _auto_std_labels = set()
+                for (_pc, _nm), _lst in _auto_std_plan.items():
+                    _auto_std_labels |= set(_lst)
+
+                def _build_std_blocks():
+                    """从 res_chk.df 构建所有标准品块（两相 × 各名）"""
                     _blocks = {}
                     for _pc in ("std_acceptor", "std_donor"):
-                        for _nm2 in _std_names_by_phase[phase_cat]:
+                        for _nm2 in sorted(res_chk.df[res_chk.df["category"] == _pc]["sample"].unique()):
                             _df_nm2 = res_chk.df[(res_chk.df["category"] == _pc)
                                                  & (res_chk.df["sample"] == _nm2)]
                             _mat2 = C.get_std_injection_matrix(_df_nm2, _pc, res_chk.analytes)
@@ -1717,34 +1722,22 @@ def page_new_experiment():
                                            for idx, row in _mat2.iterrows()}
                                 _blocks[(_pc, _nm2)] = {"units": _units2,
                                                         "floor": max(2, min(5, len(_mat2) - 1))}
-                    _plan = C.plan_auto_exclusion(_blocks, {"default": 2}, mode="conservative",
+                    return _blocks
+
+                _sc_cols = st.columns([1, 1, 5])
+                if _sc_cols[0].button("🪄 保守剔除（标准品）", key="auto_std_conservative"):
+                    _plan = C.plan_auto_exclusion(_build_std_blocks(), {"default": 2}, mode="conservative",
                                                   min_n_gain=1, min_rsd_rel=0.05)
                     st.session_state[_auto_std_key] = _plan["excluded"]
                     st.session_state[f"_auto_std_card_{std_eid}"] = _plan
                     st.rerun()
                 if _sc_cols[1].button("🪄 激进剔除（标准品）", key="auto_std_aggressive"):
-                    _blocks = {}
-                    for _pc in ("std_acceptor", "std_donor"):
-                        for _nm2 in _std_names_by_phase[phase_cat]:
-                            _df_nm2 = res_chk.df[(res_chk.df["category"] == _pc)
-                                                 & (res_chk.df["sample"] == _nm2)]
-                            _mat2 = C.get_std_injection_matrix(_df_nm2, _pc, res_chk.analytes)
-                            if len(_mat2) >= 3:
-                                _units2 = {idx: {a: (float(v) if pd.notna(v) else None)
-                                                 for a, v in row.items()}
-                                           for idx, row in _mat2.iterrows()}
-                                _blocks[(_pc, _nm2)] = {"units": _units2,
-                                                        "floor": max(2, min(5, len(_mat2) - 1))}
-                    _plan = C.plan_auto_exclusion(_blocks, {"default": 2}, mode="aggressive",
+                    _plan = C.plan_auto_exclusion(_build_std_blocks(), {"default": 2}, mode="aggressive",
                                                   min_n_gain=1, min_rsd_rel=0.05)
                     st.session_state[_auto_std_key] = _plan["excluded"]
                     st.session_state[f"_auto_std_card_{std_eid}"] = _plan
                     st.rerun()
                 _sc_cols[2].caption("标准品剔除按名全局生效（影响所有使用该名的组）。保守=只剔1针且需Q达标+明显改善；激进=到下限或无改进即停。")
-                _auto_std_plan = st.session_state.get(_auto_std_key) or {}
-                _auto_std_labels = set()
-                for (_pc, _nm), _lst in _auto_std_plan.items():
-                    _auto_std_labels |= set(_lst)
                 _auto_std_card = st.session_state.get(f"_auto_std_card_{std_eid}")
                 if _auto_std_card:
                     with st.expander("🪄 自动剔除建议明细（尚未保存，核对后点下方按钮）", expanded=True):
@@ -2575,6 +2568,7 @@ def page_experiment_list():
                 except Exception:
                     pass
             st.session_state["_flash_msg"] = f"已删除实验 {del_folder}。"
+            st.session_state.pop("ne_folder", None)
             st.rerun()
 
 
@@ -4988,7 +4982,7 @@ def page_calculator():
                 column_config={
                     "名称": st.column_config.TextColumn("名称", width="medium"),
                     "分子量(g/mol)": st.column_config.NumberColumn("分子量(g/mol)", format="%.2f")},
-                use_container_width=True)
+                width="stretch")
             _bs_ok = True
             _bs_tbl_btn1, _bs_tbl_btn2 = st.columns(2)
             if _bs_tbl_btn1.button("💾 保存缓冲盐表", key="bs_tbl_save"):
@@ -5003,6 +4997,7 @@ def page_calculator():
                     st.error("存在空名称行，请补全后再保存。")
             if _bs_tbl_btn2.button("↩️ 恢复内置默认", key="bs_tbl_reset"):
                 S.save_buffer_salt_table(S.DEFAULT_BUFFER_SALT_TABLE)
+                st.session_state.pop("buffer_salt_tbl", None)
                 st.success("已恢复内置默认。"); st.rerun()
 
     # ---- Tab4: 摩尔浓度试剂配制 ----

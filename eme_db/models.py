@@ -201,6 +201,11 @@ def upsert_experiment(conn: sqlite3.Connection, data: dict) -> int:
         # created_at 同理：UPDATE 路径不覆盖原始创建时间
         upd_cols = [c for c in cols if c != "excluded_samples" or data.get("excluded_samples") is not None]
         upd_cols = [c for c in upd_cols if c != "created_at"]
+        # qc_combos 未显式提供时保留旧值（重新生成不得抹掉已保存的多标准品组合）
+        if data.get("qc_combos") is None:
+            upd_cols = [c for c in upd_cols if c != "qc_combos"]
+        if data.get("sample_format") is None:
+            upd_cols = [c for c in upd_cols if c != "sample_format"]
         sets = ", ".join(f"{c}=?" for c in upd_cols)
         conn.execute(f"UPDATE experiments SET {sets} WHERE id=?",
                      tuple(data.get(c) for c in upd_cols) + (eid,))
