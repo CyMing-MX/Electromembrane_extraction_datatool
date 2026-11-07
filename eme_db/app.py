@@ -5,6 +5,7 @@ EME 实验数据管理系统 - Streamlit 主应用
 """
 from __future__ import annotations
 import sys
+import os
 import re
 import json
 from pathlib import Path
@@ -1746,11 +1747,14 @@ def page_new_experiment():
                                 _pc2, _nm2 = _bk
                                 _ph_cn = "受体相" if _pc2 == "std_acceptor" else "供体相"
                                 st.caption(f"{_ph_cn}标准品「{_nm2}」：建议剔除 {', '.join(sorted(_names))}")
-                        _bn = sum(v[0] for v in _auto_std_card["before"].values())
-                        _an = sum(v[0] for v in _auto_std_card["after"].values())
-                        _bs = sum(v[1] for v in _auto_std_card["before"].values())
-                        _as_ = sum(v[1] for v in _auto_std_card["after"].values())
-                        st.caption(f"超阈物质总数 {_bn} → {_an}；RSD% 累加 {_bs:.1f} → {_as_:.1f}（标准品自身口径）")
+                        for _bk2, _b2, _a2 in zip(
+                                _auto_std_card["before"].keys(),
+                                _auto_std_card["before"].values(),
+                                _auto_std_card["after"].values()):
+                            if _a2[0] < _b2[0] or _a2[1] < _b2[1]:
+                                _pc3, _nm3 = _bk2
+                                _ph_cn = "受体相" if _pc3 == "std_acceptor" else "供体相"
+                                st.caption(f"✅ {_ph_cn}「{_nm3}」：超阈 {_b2[0]}→{_a2[0]}，RSD%累加 {_b2[1]:.1f}→{_a2[1]:.1f}")
                         if _auto_std_card.get("blocked"):
                             st.caption("被 Q 检验拦下：" + "、".join(sorted({b["unit"] for b in _auto_std_card["blocked"]})))
                         if st.button("✖ 清除自动建议（标准品）", key="auto_std_clear"):
@@ -2052,6 +2056,15 @@ def page_experiment_list():
     st.subheader("选择实验查看详情")
     sel_folder = st.selectbox("选择实验", exps["folder"].tolist(), key="el_sel")
     st.session_state["_cur_detail_folder"] = sel_folder
+
+    # 快速打开 DATA.xlsx
+    _dx_path = config.EXPERIMENTS_DIR / sel_folder / f"{sel_folder.split('-')[0]}-DATA.xlsx" if "-" in sel_folder else None
+    _dx_row = conn.execute("SELECT data_xlsx FROM experiments WHERE folder=?", (sel_folder,)).fetchone()
+    if _dx_row and _dx_row["data_xlsx"]:
+        _dx_path = Path(_dx_row["data_xlsx"])
+    if _dx_path and _dx_path.exists():
+        if st.button("📂 快速打开 DATA.xlsx", key=f"open_dx_{sel_folder}"):
+            os.startfile(str(_dx_path))
 
     # —— 侧栏：分析物 / SLM 详情查询（三页共用，选择跨页保留）——
     def _ph_lookup_det(a):
@@ -3204,11 +3217,17 @@ def _exclusion_ui(eid, folder, group_labels):
                     _gnum, _ph = _bk
                     _ph_cn = "受体相" if _ph == "A" else "供体相"
                     st.caption(f"组{_gnum} {_ph_cn}：建议剔除 {', '.join(sorted(_names))}")
-            _before_n = sum(v[0] for v in _auto_card["before"].values())
-            _after_n = sum(v[0] for v in _auto_card["after"].values())
-            _before_s = sum(v[1] for v in _auto_card["before"].values())
-            _after_s = sum(v[1] for v in _auto_card["after"].values())
-            st.caption(f"超阈物质总数 {_before_n} → {_after_n}；RSD% 累加 {_before_s:.1f} → {_after_s:.1f}")
+            _improved_blocks = [(bk, b, a) for bk, b, a in zip(
+                _auto_card["before"].keys(),
+                _auto_card["before"].values(),
+                _auto_card["after"].values()) if a[0] < b[0] or a[1] < b[1]]
+            if _improved_blocks:
+                for _bk, _b, _a in _improved_blocks:
+                    _gnum, _ph = _bk
+                    _ph_cn = "受体相" if _ph == "A" else "供体相"
+                    st.caption(f"✅ 组{_gnum} {_ph_cn}：超阈物质 {_b[0]}→{_a[0]}，RSD%累加 {_b[1]:.1f}→{_a[1]:.1f}")
+            else:
+                st.caption("（本次建议未改善任何组的 RSD）")
             if _auto_card.get("blocked"):
                 st.caption("被 Q 检验拦下（非统计离群，不剔除）："
                            + "、".join(sorted({b["unit"] for b in _auto_card["blocked"]})))
