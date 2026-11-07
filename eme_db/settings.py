@@ -272,6 +272,37 @@ DEFAULT_REAGENT_TABLE = [
 ]
 
 
+DEFAULT_BUFFER_SALT_TABLE = [
+    {"名称": "甲酸铵", "分子量(g/mol)": 63.06},
+    {"名称": "乙酸铵", "分子量(g/mol)": 77.08},
+]
+
+
+def get_buffer_salt_table() -> list:
+    """读取缓冲盐表：自定义覆盖内置（同名以自定义为准）"""
+    user = load_settings()
+    custom = user.get("buffer_salt_table", [])
+    if not isinstance(custom, list):
+        custom = []
+    merged = {r["名称"]: dict(r) for r in DEFAULT_BUFFER_SALT_TABLE}
+    for r in custom:
+        if isinstance(r, dict) and r.get("名称"):
+            merged[r["名称"]] = r
+    return list(merged.values())
+
+
+def save_buffer_salt_table(rows: list):
+    """保存缓冲盐表"""
+    user = load_settings()
+    clean = []
+    for r in rows:
+        if isinstance(r, dict) and r.get("名称"):
+            clean.append({"名称": str(r["名称"]),
+                          "分子量(g/mol)": float(r.get("分子量(g/mol)") or 0)})
+    user["buffer_salt_table"] = clean
+    save_settings(user)
+
+
 def get_reagent_table() -> list:
     """读取摩尔试剂表：自定义表覆盖内置（同名条目以自定义为准）"""
     user = load_settings()
