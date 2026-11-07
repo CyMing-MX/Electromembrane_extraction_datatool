@@ -4961,6 +4961,23 @@ def page_calculator():
         q3.metric("水加入量 (mL)", f"{v_water:.4g}")
         st.caption("说明：先量取甲酸，再量甲醇时扣除甲酸体积，最后加水至终体积。")
 
+        # —— 缓冲盐计算（甲酸铵/乙酸铵，浓度 mM）——
+        st.markdown("**缓冲盐加入量**（甲酸铵 / 乙酸铵）")
+        bs_c1, bs_c2, bs_c3, bs_c4 = st.columns(4)
+        bs_salt = bs_c1.selectbox("缓冲盐", ["甲酸铵", "乙酸铵"], key="bs_salt")
+        bs_mm = bs_c2.number_input("浓度 (mM)", value=10.0, format="%g", key="bs_c")
+        bs_v = bs_c3.number_input("流动相体积 (mL)", value=float(vol_ml), format="%g", key="bs_v")
+        bs_MW = {"甲酸铵": 63.06, "乙酸铵": 77.08}
+        mw = bs_MW.get(bs_salt, 63.06)
+        bs_mass_g = bs_mm * mw * bs_v / 1000.0 / 1000.0  # mM·g/mol·mL / 1000 → g
+        bs_mass_mg = bs_mass_g * 1000.0
+        if bs_mass_g < 1.0:
+            bs_c4.metric("需要缓冲盐", f"{bs_mass_mg:.1f} mg")
+        else:
+            bs_c4.metric("需要缓冲盐", f"{bs_mass_g:.2f} g")
+        st.caption(f"计算：{bs_salt} 分子量 {mw} g/mol × 浓度 {bs_mm:g} mM × 体积 {bs_v:g} mL ÷ 1000"
+                   f"{'（结果 <1 g，已换算为 mg）' if bs_mass_g < 1.0 else ''}")
+
     # ---- Tab4: 摩尔浓度试剂配制 ----
     with tab4:
         st.markdown("按目标摩尔浓度配制试剂：由内置/自定义的**分子量+密度表**计算加入质量与体积")
