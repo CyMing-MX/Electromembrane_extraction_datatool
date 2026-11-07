@@ -244,17 +244,33 @@ def find_current_for_experiment(folder_name: str, exp_type: str = None,
             if data:
                 result[folder_name] = data
         else:
-            # 模糊匹配
+            # 模糊匹配：子串
+            matched = False
             data = load_current_sheet(folder_name)
             if data:
-                # load_current_sheet 内部已做模糊匹配，但不知道实际 sheet 名
-                # 重新找
                 for s in index:
                     if folder_name in s or s in folder_name:
                         d = load_current_sheet(s)
                         if d:
                             result[s] = d
+                            matched = True
                             break
+            # 日期前缀匹配：文件夹名和 sheet 名都以 8 位日期开头（如 20261030）
+            if not matched:
+                date_prefix = folder_name[:8] if len(folder_name) >= 8 else folder_name
+                _cands = [s for s in index if s.startswith(date_prefix)]
+                if len(_cands) == 1:
+                    d = load_current_sheet(_cands[0])
+                    if d:
+                        result[_cands[0]] = d
+                        matched = True
+                elif len(_cands) > 1:
+                    # 多个同名日期前缀 sheet：全选（可能是同一天多组实验）
+                    for s in _cands:
+                        d = load_current_sheet(s)
+                        if d:
+                            result[s] = d
+                            matched = True
     return result
 
 
