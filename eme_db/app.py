@@ -1659,6 +1659,7 @@ def page_new_experiment():
         # 用户原地重试时表格编辑仍在，不会被迫重填
         st.session_state.pop("_ne_qtbl_edits", None)
         st.session_state.pop("_ne_qtbl_edits_sig", None)
+        st.toast("✅ 生成完成！", icon="✅")
         st.success(f"✅ 完成！Excel：`{data_xlsx}`  实验ID：{eid}"
                    + (f"（电压表已写入 {n_pts} 点电流数据；组条件已同步）" if n_pts else "（组条件已同步）"))
         if _fallback_groups and exp_type.get("key") in N.EXP_TYPE_PREFIX:
@@ -2580,6 +2581,7 @@ def page_experiment_list():
                     _gdo_clear()
                 except Exception:
                     pass
+            st.toast("🗑 已删除", icon="🗑")
             st.session_state["_flash_msg"] = f"已删除实验 {del_folder}。"
             st.session_state.pop("ne_folder", None)
             st.rerun()
@@ -3356,6 +3358,7 @@ def _exclusion_ui(eid, folder, group_labels):
         except Exception as e:
             st.caption(f"（Excel 同步更新失败：{e}）")
         # 一次性提示：先存 session_state 再 rerun（直接 st.success 后 rerun 用户看不到）
+        st.toast("✅ 剔除已保存", icon="✅")
         st.session_state[f"_excl_saved_msg_{eid}"] = (
             f"✅ 已剔除 {len(all_excl)} 个样本，**已保存到数据库并重新生成 DATA.xlsx**"
             + (f"（`{fname}`）" if fname else "")
@@ -3672,6 +3675,7 @@ def _edit_experiment_ui(eid, row, folder):
                         width="stretch", hide_index=True)
 
         # 保存结果一次性提示（按钮在下方：保存修改并重新生成 DATA.xlsx）
+        st.toast("✅ 修改已保存", icon="✅")
         msg_key_ed2 = f"_ed_regen_msg_{eid}"
         if st.session_state.get(msg_key_ed2):
             st.success(st.session_state[msg_key_ed2])
