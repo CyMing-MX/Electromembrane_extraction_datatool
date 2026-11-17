@@ -574,12 +574,26 @@ def build_excel(
                                     use_sample=use_sample, excluded_samples=excluded_samples,
                                     group_qc=qc_by_group, default_qc=default_qc)
 
+    # 标准品保留时间均值（剔除异常针后；res.df 已不含被剔除的标准品针）：
+    # 优先受体相标准品，缺该物质时回退供体相标准品
+    _std_rt = {}
+    try:
+        _sa = res.df[res.df["category"] == "std_acceptor"]
+        _std_rt = _sa.groupby("analyte")["rt"].mean().to_dict()
+        _sd = res.df[res.df["category"] == "std_donor"]
+        for a, v in _sd.groupby("analyte")["rt"].mean().to_dict().items():
+            if a not in _std_rt or pd.isna(_std_rt.get(a)):
+                _std_rt[a] = v
+        _std_rt = {a: float(v) for a, v in _std_rt.items() if pd.notna(v)}
+    except Exception:
+        _std_rt = {}
     # 写各表
     write_summary_sheet(wb, res, metrics_fixed, meta, Va, Vd, use_sample, gcond=gcond,
                         default_qc=default_qc)
     write_data_summary_sheet(wb, metrics_fixed, gcond, res.analytes, res.groups,
                              sample_format=getattr(res, "sample_format", "") or "",
-                             n_replicates=res.n_replicates, excluded_samples=excluded_samples)
+                             n_replicates=res.n_replicates, excluded_samples=excluded_samples,
+                             std_rt_mean=_std_rt)
     write_rt_sheet(wb, res)
     # SN / 峰高 / 半峰宽 原始数据表（仅当解析数据含这些列时生成，与网页端表格同步）
     _write_value_pivot_sheet(wb, res, "sn", "SN表", "信噪比")
@@ -635,7 +649,7 @@ def _add_group_charts(ws, res: ParseResult, group: int, Va: float, Vd: float,
     if n_a == 0:
         return
     last_row = 1 + n_a
-    chart_row = max(last_row + 2, 33)      # 数据表下方，33行起（用户指定 32 行以后）
+    chart_row = last_row + 3               # 数据表下方自适应（物质少时紧跟数据区，不再固定33行）
     data_row = chart_row + 21              # 图高约 9.5cm ≈ 19 行，留余量
     mrow = {m.analyte: m for m in (metrics_rows or [])}
 
@@ -650,14 +664,13 @@ def _add_group_charts(ws, res: ParseResult, group: int, Va: float, Vd: float,
         try:
             info = _ref.get_analyte_info(a)
             if info is not None:
-                for lp_col in ("C-LogP", "Logp", "LogP"):
-                    if lp_col in info.index:
-                        v = _ref._try_float(info[lp_col])
-                        if v is not None:
-                            return v
+                lp_col = _ref.resolve_logp_column(info.index)
+                if lp_col is not None:
+                    return _ref._try_float(info[lp_col])
+                return None
+            return None
         except Exception:
-            pass
-        return None
+            return None
 
     # —— 数据块 1：三相分布（A列起）——
     dist_ok = False
@@ -818,11 +831,12 @@ def _add_group_charts(ws, res: ParseResult, group: int, Va: float, Vd: float,
 def write_data_summary_sheet(wb: Workbook, metrics: list, gcond: Optional[pd.DataFrame],
                              analytes: list, groups: list,
                              n_replicates: int = 3, excluded_samples: Optional[set] = None,
-                             sample_format: str = ""):
+                             sample_format: str = "", std_rt_mean: Optional[dict] = None):
     """「数据汇总」sheet：物质×实验组矩阵（类似手工作表样式）。
-    依次排列：物质性质列（LogP/电荷@供体pH）+ 每组一列；五个矩阵块：
+    依次排列：物质性质列（LogP / 保留时间 / 电荷@供体pH）+ 每组一列；五个矩阵块：
     回收率 / 供体相至SLM转移率 / SLM至受体相转移率 / 受体峰面积RSD / 供体峰面积RSD。
     每块带色阶条件格式 + 底部统计行（有效数 / >=40 / 20~40 / <20）。
+    std_rt_mean: {物质: 剔除异常针后的标准针RT均值}——无 LogP 数据时按 RT 升序排列。
     """
     import json as _json
     _fmt_eff = sample_format  # 实验实际生效的样品名格式（剔除计数解析用）
@@ -841,7 +855,7 @@ def write_data_summary_sheet(wb: Workbook, metrics: list, gcond: Optional[pd.Dat
     def _props(analyte):
         if analyte in prop_cache:
             return prop_cache[analyte]
-        logp = charge = None
+        logp = rt = charge = None
         try:
             from . import reference as _ref
         except Exception:
@@ -853,11 +867,9 @@ def write_data_summary_sheet(wb: Workbook, metrics: list, gcond: Optional[pd.Dat
             try:
                 info = _ref.get_analyte_info(analyte)
                 if info is not None:
-                    for lp_col in ("C-LogP", "Logp", "LogP"):  # 新旧表列名兼容
-                        if lp_col in info.index:
-                            logp = _ref._try_float(info[lp_col])
-                            if logp is not None:
-                                break
+                    lp_col = _ref.resolve_logp_column(info.index)
+                    if lp_col is not None:
+                        logp = _ref._try_float(info[lp_col])
                 ph = None
                 for gi in groups:
                     if gi in grp_info and grp_info[gi][1] not in (None, ""):
@@ -866,11 +878,23 @@ def write_data_summary_sheet(wb: Workbook, metrics: list, gcond: Optional[pd.Dat
                     charge = _ref.get_property_by_ph(analyte, "charge", ph)
             except Exception:
                 pass
-        prop_cache[analyte] = (logp, charge)
-        return logp, charge
+        if std_rt_mean:
+            rt = std_rt_mean.get(analyte)
+        prop_cache[analyte] = (logp, rt, charge)
+        return logp, rt, charge
 
-    # 物质排序：按 LogP 升序（与手工表一致），无 LogP 的排最后
-    analytes_sorted = sorted(analytes, key=lambda a: (_props(a)[0] is None, _props(a)[0] if _props(a)[0] is not None else 0))
+    # 物质排序：有 LogP 数据时按 LogP 升序（与手工表一致），无 LogP 的排最后；
+    # 整体无 LogP 数据时改按保留时间（min）升序；RT 作为次级稳定排序键
+    _any_logp = any(_props(a)[0] is not None for a in analytes)
+    if _any_logp:
+        analytes_sorted = sorted(analytes, key=lambda a: (_props(a)[0] is None,
+                                                          _props(a)[0] if _props(a)[0] is not None else 0,
+                                                          _props(a)[1] if _props(a)[1] is not None else 9e9))
+        _sort_note = "（按LogP升序）"
+    else:
+        analytes_sorted = sorted(analytes, key=lambda a: (_props(a)[1] is None,
+                                                          _props(a)[1] if _props(a)[1] is not None else 0))
+        _sort_note = "（按保留时间升序）"
 
     blocks = [
         ("recovery", "回收率（物质 × 实验组，%）", (0, 100), "rate"),
@@ -892,13 +916,14 @@ def write_data_summary_sheet(wb: Workbook, metrics: list, gcond: Optional[pd.Dat
         # 组头两行：M{n} / 组别名
         ws.cell(row=row, column=1, value="物质").font = Font(bold=True)
         ws.cell(row=row, column=2, value="LogP").font = Font(bold=True)
-        ws.cell(row=row, column=3, value="charge@供体pH").font = Font(bold=True)
+        ws.cell(row=row, column=3, value="保留时间（min）").font = Font(bold=True)
+        ws.cell(row=row, column=4, value="charge@供体pH").font = Font(bold=True)
         for gi, g in enumerate(groups):
             lbl, ph, slm = grp_info.get(g, (f"M{g}", None, ""))
-            ws.cell(row=row, column=4 + gi, value=f"M{g}").font = Font(bold=True)
-            _lbl_cell = ws.cell(row=row + 1, column=4 + gi, value=lbl)  # 全名写入，不截断
+            ws.cell(row=row, column=5 + gi, value=f"M{g}").font = Font(bold=True)
+            _lbl_cell = ws.cell(row=row + 1, column=5 + gi, value=lbl)  # 全名写入，不截断
             _lbl_cell.alignment = CENTER  # 长名自动换行显示
-        ws.cell(row=row + 1, column=1, value="（按LogP升序）").font = Font(italic=True, size=9)
+        ws.cell(row=row + 1, column=1, value=_sort_note).font = Font(italic=True, size=9)
         header_row = row + 1
         # 数据行
         data_start = row + 2
@@ -906,17 +931,19 @@ def write_data_summary_sheet(wb: Workbook, metrics: list, gcond: Optional[pd.Dat
         for ai, analyte in enumerate(analytes_sorted):
             rr = data_start + ai
             ws.cell(row=rr, column=1, value=analyte)
-            logp, charge = _props(analyte)
+            logp, rt, charge = _props(analyte)
             if logp is not None:
                 ws.cell(row=rr, column=2, value=round(logp, 3))
+            if rt is not None:
+                ws.cell(row=rr, column=3, value=round(rt, 3))
             if charge is not None:
-                ws.cell(row=rr, column=3, value=round(charge, 3))
+                ws.cell(row=rr, column=4, value=round(charge, 3))
         # 值填入 + 条件格式
         value_by = {}
         for m in metrics:
             value_by[(m.analyte, m.group)] = getattr(m, field, None)
-        first_data_col = 4
-        last_col = 3 + len(groups)
+        first_data_col = 5
+        last_col = 4 + len(groups)
         for gi, g in enumerate(groups):
             for ai, analyte in enumerate(analytes_sorted):
                 rr = data_start + ai
@@ -966,9 +993,10 @@ def write_data_summary_sheet(wb: Workbook, metrics: list, gcond: Optional[pd.Dat
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 8
     ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 14
     for gi in range(len(groups)):
-        ws.column_dimensions[_col(4 + gi)].width = 16
-    ws.freeze_panes = "D1"
+        ws.column_dimensions[_col(5 + gi)].width = 16
+    ws.freeze_panes = "E1"
 
 
 # 「组条件」sheet 已移除：与总表内的组条件表完全重复（write_summary_sheet 负责写入总表）

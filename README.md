@@ -1,59 +1,13 @@
-# EME Experiment Data Management System · EME 实验数据管理系统
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-电膜萃取（EME）实验 LC-MS 数据的一站式本地管理工具：**自动解析仪器导出 → 计算回收率/转移率/RSD →
-生成带真实公式的 Excel 留痕 → 跨实验质控看板**。Streamlit + SQLite + openpyxl，数据全本地，无需联网。
-
-> **适用范围**：本工具为 **AB SciEX 液质联用仪的长表格导出**设计——即每行一条
-> "样本 × 组分（离子对）" 记录的制表符分隔 txt（列含 Sample Name / Component Name / Area /
-> Retention Time，即本系统的 ALLDATA 格式；配套的 AREA+RT 宽表对也已兼容）。
-> **其他品牌（Thermo / Waters / Agilent 等）或其他导出格式未经测试**——它们通常只需在
-> `eme_db/parser.py` 的列名映射（`_ALLDATA_COLS`）里补充别名即可适配，欢迎提 issue 反馈。
-
-**⬇️ 免安装便携版**（Windows）：见右侧 [Releases](../../releases) —— 下载解压，双击 `EME_Data.exe` 即用。
-
-## 仓库结构
-
-```
-├── eme_db/            源代码（Streamlit 应用 + 解析/计算/Excel 生成模块）
-├── data_template/     数据模板：示例分析物/SLM信息库 + 一个合成演示实验（20250101-2M）
-├── 使用说明.md → README.md   完整使用手册（本文档主体）
-├── PACKAGING.md       自行打包 exe 的步骤与踩坑指南
-└── LICENSE            MIT
-```
-
-## 快速开始（源码版）
-
-```bash
-pip install -r eme_db/requirements.txt
-# 首次：把 data_template 复制一份改名为 data（与 eme_db 同级），即可用演示实验体验全流程
-cd eme_db
-streamlit run app.py     # 或 Windows 双击 run.bat
-```
-
-## 快速开始（便携版）
-
-解压后双击 `EME_Data.exe`。首次使用可把 `data_template` 里的示例实验拖入「新增实验」页体验；
-之后把自己的信息库（analyte.xlsx / SLM.xlsx）和仪器导出的 ALLDATA.txt 放进 `data\` 对应位置。
-
-## 数据与隐私
-
-- 所有数据只存本地（SQLite + Excel），**不上传任何服务器**。
-- 仓库自带的是**合成的演示数据**，不含任何真实实验数据。
-
-## 从源码打包 exe
-
-见 [PACKAGING.md](PACKAGING.md)（PyInstaller onedir 一键脚本 + 自检 + 踩坑表）。
-
----
-
 # EME 实验数据管理系统 · 使用说明
 
 > 电膜萃取（EME）实验 LC-MS 数据的一站式管理：自动解析仪器导出文件 → 计算回收率/转移率/RSD →
 > 生成带真实公式的 Excel 留痕文件 → 跨实验质控看板与筛选对比。
 > 所有数据保存在本地（SQLite + Excel），不依赖网络，不上传任何数据。
 > 版本：2026-10
+>
+> **适用范围**：本工具为 **AB SciEX 液质联用仪的长表格 txt 导出**设计（ALLDATA 长表，
+> 兼容 AREA+RT 宽表对）；其他品牌或导出格式未经测试，接入一般只需在
+> `eme_db/parser.py` 补充列名映射。
 
 ---
 
@@ -139,7 +93,7 @@ EME_Data\
 
 - 工作表 `drug`（或任何含"名称/name"列的表）：一行一种分析物。
 - 必有：物质名主键列（列名含 `名`/`name` 即可，如 `Input-englishname`、`物质名`）。
-- 常用可选列（列名自适应，新旧表头都认）：`C-LogP`/`LogP`、`C-HBA`/`HBA`、`C-HBD`/`HBD`、
+- 常用可选列（列名自适应，新旧表头都认）：`C-LogP`/`LogP`/`logP_pubchem`（多列含 LogP 时按文件列序取最先一列）、`C-HBA`/`HBA`、`C-HBD`/`HBD`、
   `C-TPSA`/`TPSA`、`C-pka-A`、`C-pka-B`、`C-精确分子量`、`CAS`、缩写列（`缩写`/`Abbreviation`）。
 - **pH 宽表**（可选，如 `LogD`、`charge`、`solubility`）：第 1 列物质名、第 2 列属性名、
   第 3 列起为 pH 0.0~14.0 的数值列。程序自动识别所有此类工作表。
@@ -163,8 +117,7 @@ EME_Data\
   峰面积（Area）、保留时间（RT）；建议同时勾选导出 **SN（Signal/Noise）**、峰高（Height）、
   半峰宽（Width at 50%）——三者缺省只是少对应的表，不影响主流程。
 - 也兼容 AB 的 `日期-AREA.txt` + `日期-RT.txt` 宽表组合（此时无 SN/峰高表）。
-- **其他品牌/格式未测试**：Thermo/Waters/Agilent 等的导出如需接入，一般改
-  `eme_db/parser.py` 里的列名映射即可，不一定动主逻辑。
+- **其他品牌/格式未测试**：如需接入一般改 `eme_db/parser.py` 里的列名映射即可。
 - N/A 与空值按 0 参与计算；同一样本重复进样取第一次并警告。
 - 样本命名格式默认 `1-A-1`（组-相-重复），支持 `A1-1` 预设与自定义正则（见 十三）；供体相用 `D` 或 `S` 均可（`1-D-1` 自动按供体相识别，内部统一记作 S）。
 
@@ -328,7 +281,7 @@ EME_Data\
 | 工作表 | 内容 |
 |---|---|
 | 总表 | 元数据区（温湿度/pH/Va/Vd/质控名/说明）+ 组条件总表 + 标准品峰面积汇总 |
-| 数据汇总 | 物质×实验组五大矩阵（回收率/两种转移率/两种RSD），LogP/charge@供体pH 性质列，色阶+统计行（真实 COUNTIF 公式），组别名完整显示（长名自动换行） |
+| 数据汇总 | 物质×实验组五大矩阵（回收率/两种转移率/两种RSD），LogP/保留时间（min，剔除异常针后标准针均值）/charge@供体pH 性质列（LogP 与 charge 之间），色阶+统计行（真实 COUNTIF 公式），组别名完整显示（长名自动换行）；信息表无 LogP 时按保留时间升序排列 |
 | RT表 / SN表 / 峰高表 / 半峰宽表 | 样本×物质透视（SN/峰高按列存在才生成） |
 | 电压表 | 时间-电流（来自 current\ 的关联 sheet；空表可手贴） |
 | M1~Mn | 每组：受体/供体各重复峰面积（缺失重复留空、被剔除标灰）+ 均值/RSD/回收率/转移率 **真实公式**（改数即重算）+ 修正列（剔除后重算值）+ 孔位/异常标签/备注 + 底部三张原生图表（三相分布 / RSD-回收率散点 / LogP-回收率散点，全实验统一 0~100 自动扩展轴） |

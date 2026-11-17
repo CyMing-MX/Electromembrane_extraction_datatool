@@ -284,24 +284,6 @@ def render_slm_sidebar(slm_name: str):
 def page_new_experiment():
     st.title("➕ 新增实验")
 
-    # —— 录入步骤导航（每步聚焦一个决策；其它步骤可手动展开查看，内容不丢失）——
-    _NE_STEPS = ["1 选择文件夹", "2 质控样", "3 元数据", "3.5 电流记录", "4 萃取条件", "5 生成", "6 标准品检查"]
-    st.session_state.setdefault("ne_step", _NE_STEPS[0])
-    _si = _NE_STEPS.index(st.session_state["ne_step"]) if st.session_state["ne_step"] in _NE_STEPS else 0
-
-    def _ne_goto(target: str):
-        # on_click 回调先于本轮控件渲染执行——改控件 session_state 的官方可靠方式
-        st.session_state["ne_step_w"] = target
-        st.session_state["ne_step"] = target
-
-    _ne_step = st.radio("录入步骤", _NE_STEPS, horizontal=True, index=_si, key="ne_step_w")
-    st.session_state["ne_step"] = _ne_step
-    _nc_prev, _nc_next, _nc_sp = st.columns([1, 1, 4])
-    _nc_prev.button("⬅ 上一步", disabled=(_si == 0), key="ne_step_prev",
-                    on_click=_ne_goto, args=(_NE_STEPS[max(0, _si - 1)],))
-    _nc_next.button("下一步 ➡", disabled=(_si == len(_NE_STEPS) - 1), key="ne_step_next",
-                    on_click=_ne_goto, args=(_NE_STEPS[min(len(_NE_STEPS) - 1, _si + 1)],))
-    _nc_sp.caption(f"步骤 {_si + 1}/{len(_NE_STEPS)}——当前步骤已展开；其余步骤内容仍在运行，可手动展开查看。")
     exp_root = config.EXPERIMENTS_DIR
     if not exp_root.exists():
         exp_root.mkdir(parents=True, exist_ok=True)
@@ -1563,118 +1545,119 @@ def page_new_experiment():
 
     # ---- 生成 ----
     if st.button("✅ 生成 Excel + 写入数据库", type="primary"):
-        conn = get_db()
-        # 质控名以下拉当前值为准：与解析覆盖不一致时重解析，保证指标/Excel 与保存的 qc_names 一致
-        if dict(qc_names) != (_qc_override or {}):
-            st.session_state[f"ne_qc_override_{sel}"] = dict(qc_names)
-            res3 = _cached_parse(sel, json.dumps(_qc_for_parse, ensure_ascii=False),
-                                 _eff_fmt or "", _folder_sig(sel))
-        else:
-            res3 = st.session_state["cur_res"]
-        # 重新生成已有实验时套用已保存的剔除记录（样本+标准品针），避免被悄悄还原
-        _pre_row = conn.execute("SELECT id FROM experiments WHERE folder=?", (sel,)).fetchone()
-        _saved_excl_re = M.get_excluded_samples(conn, int(_pre_row["id"])) if _pre_row else set()
-        _saved_std_re = M.get_excluded_std(conn, int(_pre_row["id"])) if _pre_row else {}
-        if _saved_std_re:
-            _drop_re = set().union(*_saved_std_re.values())
-            if _drop_re:
-                # 用副本承载过滤结果：不得原地改 cur_res——步骤6 需要完整标准品针列表
-                # （预勾选已剔除针供取消），原地过滤会让旧剔除在确认时被误清
-                import dataclasses as _dc
-                _mask_re = res3.df.apply(
-                    lambda r_: (str(r_["sample"]), int(r_["injection_idx"])) in _drop_re, axis=1)
-                res3 = _dc.replace(res3, df=res3.df[~_mask_re].copy())
-        # 多标准品组合：各组 QC 配置（提交时从组条件构建；解析已保留全部标准品行）
-        _combos_for_calc = qc_combos if (_multi_qc and qc_combos) else []
-        _gqc_submit = {}
-        for _g_, _gc_ in group_full.items():
-            _cn_ = _gc_.get("qc_combo")
-            if _cn_:
-                _c_ = next((c for c in _combos_for_calc if c.get("name") == _cn_), None)
-                if _c_:
-                    _gqc_submit[int(_g_)] = {k: _c_.get(k) for k, _ in QC_ROLES}
-        _default_qc_submit = ({k: (v[0] if isinstance(v, list) else v) for k, v in _qc_for_parse.items()}
-                              if isinstance(_qc_for_parse.get("std_acceptor"), list) else dict(qc_names))
-        metrics = C.compute_metrics(res3.df, res3.analytes, res3.groups,
-                                    meta["Va"], meta["Vd"], use_sample=bool(meta["use_sample"]),
-                                    excluded_samples=_saved_excl_re,
-                                    group_qc=_gqc_submit, default_qc=_default_qc_submit)
-        data_xlsx = folder / f"{meta['exp_date'] or res3.file_date}-DATA.xlsx"
-        exp_data = {
-            "folder": sel, "exp_date": meta["exp_date"],
-            "temperature": meta["temperature"], "humidity": meta["humidity"],
-            "column_pressure": meta["column_pressure"],
-            "Va": meta["Va"], "Vd": meta["Vd"],
-            "use_sample": meta["use_sample"], "qc_names": json.dumps(_qc_for_parse, ensure_ascii=False),
-            "exp_type": exp_type["key"], "purpose": meta["purpose"],
-            "sample_format": _eff_fmt,
-            "qc_combos": json.dumps(qc_combos, ensure_ascii=False) if (_multi_qc and qc_combos) else None,
-            "current_sheets": json.dumps(st.session_state.get("ne_current_sheets") or [], ensure_ascii=False),
-            "n_groups": len(res3.groups), "n_replicates": res3.n_replicates,
-            "data_xlsx": str(data_xlsx),
-        }
-        eid = M.upsert_experiment(conn, exp_data)
-        M.save_metrics(conn, eid, meta["exp_date"], metrics, res3.analytes, res3.groups)
-        M.save_qc_summary(conn, eid, meta["exp_date"], res3, res3.analytes,
-                          default_qc=_default_qc_submit)
-        M.save_rt_records(conn, eid, meta["exp_date"], res3)
-        def _ser(v):
-            return json.dumps(v, ensure_ascii=False) if isinstance(v, list) else v
-        base_serial = {**base, "group_label": "基准条件"}
-        for k in ["slm_additives", "donor_additives", "acceptor_additives", "note_tags",
-                  "well_position", "abnormal_wells"]:
-            base_serial[k] = _ser(base_serial.get(k, []))
-        gc_serial = {}
-        _fallback_groups = []  # 自动命名退回 M组号 的组（缺 SLM 信息），生成后提示
-        for g, c in group_full.items():
-            gc_serial[g] = {**c}
+        with st.spinner("正在解析数据并生成 DATA.xlsx（约 10~60 秒）..."):
+            conn = get_db()
+            # 质控名以下拉当前值为准：与解析覆盖不一致时重解析，保证指标/Excel 与保存的 qc_names 一致
+            if dict(qc_names) != (_qc_override or {}):
+                st.session_state[f"ne_qc_override_{sel}"] = dict(qc_names)
+                res3 = _cached_parse(sel, json.dumps(_qc_for_parse, ensure_ascii=False),
+                                     _eff_fmt or "", _folder_sig(sel))
+            else:
+                res3 = st.session_state["cur_res"]
+            # 重新生成已有实验时套用已保存的剔除记录（样本+标准品针），避免被悄悄还原
+            _pre_row = conn.execute("SELECT id FROM experiments WHERE folder=?", (sel,)).fetchone()
+            _saved_excl_re = M.get_excluded_samples(conn, int(_pre_row["id"])) if _pre_row else set()
+            _saved_std_re = M.get_excluded_std(conn, int(_pre_row["id"])) if _pre_row else {}
+            if _saved_std_re:
+                _drop_re = set().union(*_saved_std_re.values())
+                if _drop_re:
+                    # 用副本承载过滤结果：不得原地改 cur_res——步骤6 需要完整标准品针列表
+                    # （预勾选已剔除针供取消），原地过滤会让旧剔除在确认时被误清
+                    import dataclasses as _dc
+                    _mask_re = res3.df.apply(
+                        lambda r_: (str(r_["sample"]), int(r_["injection_idx"])) in _drop_re, axis=1)
+                    res3 = _dc.replace(res3, df=res3.df[~_mask_re].copy())
+            # 多标准品组合：各组 QC 配置（提交时从组条件构建；解析已保留全部标准品行）
+            _combos_for_calc = qc_combos if (_multi_qc and qc_combos) else []
+            _gqc_submit = {}
+            for _g_, _gc_ in group_full.items():
+                _cn_ = _gc_.get("qc_combo")
+                if _cn_:
+                    _c_ = next((c for c in _combos_for_calc if c.get("name") == _cn_), None)
+                    if _c_:
+                        _gqc_submit[int(_g_)] = {k: _c_.get(k) for k, _ in QC_ROLES}
+            _default_qc_submit = ({k: (v[0] if isinstance(v, list) else v) for k, v in _qc_for_parse.items()}
+                                  if isinstance(_qc_for_parse.get("std_acceptor"), list) else dict(qc_names))
+            metrics = C.compute_metrics(res3.df, res3.analytes, res3.groups,
+                                        meta["Va"], meta["Vd"], use_sample=bool(meta["use_sample"]),
+                                        excluded_samples=_saved_excl_re,
+                                        group_qc=_gqc_submit, default_qc=_default_qc_submit)
+            data_xlsx = folder / f"{meta['exp_date'] or res3.file_date}-DATA.xlsx"
+            exp_data = {
+                "folder": sel, "exp_date": meta["exp_date"],
+                "temperature": meta["temperature"], "humidity": meta["humidity"],
+                "column_pressure": meta["column_pressure"],
+                "Va": meta["Va"], "Vd": meta["Vd"],
+                "use_sample": meta["use_sample"], "qc_names": json.dumps(_qc_for_parse, ensure_ascii=False),
+                "exp_type": exp_type["key"], "purpose": meta["purpose"],
+                "sample_format": _eff_fmt,
+                "qc_combos": json.dumps(qc_combos, ensure_ascii=False) if (_multi_qc and qc_combos) else None,
+                "current_sheets": json.dumps(st.session_state.get("ne_current_sheets") or [], ensure_ascii=False),
+                "n_groups": len(res3.groups), "n_replicates": res3.n_replicates,
+                "data_xlsx": str(data_xlsx),
+            }
+            eid = M.upsert_experiment(conn, exp_data)
+            M.save_metrics(conn, eid, meta["exp_date"], metrics, res3.analytes, res3.groups)
+            M.save_qc_summary(conn, eid, meta["exp_date"], res3, res3.analytes,
+                              default_qc=_default_qc_submit)
+            M.save_rt_records(conn, eid, meta["exp_date"], res3)
+            def _ser(v):
+                return json.dumps(v, ensure_ascii=False) if isinstance(v, list) else v
+            base_serial = {**base, "group_label": "基准条件"}
             for k in ["slm_additives", "donor_additives", "acceptor_additives", "note_tags",
                       "well_position", "abnormal_wells"]:
-                gc_serial[g][k] = _ser(gc_serial[g].get(k, []))
-            # 组别名：None=自动 → 按该组实际条件生成；否则用户手动指定
-            cur_label = c.get("group_label")
-            if cur_label is None or str(cur_label).strip() == "":
-                regen = N.generate_group_label(exp_type["key"],
-                    slm_main=gc_serial[g].get("slm_main"), slm_additives=c.get("slm_additives"),
-                    pH_donor=c.get("pH_donor"), donor_additives=c.get("donor_additives"),
-                    pH_acceptor=c.get("pH_acceptor"), acceptor_additives=c.get("acceptor_additives"),
-                    extract_time=c.get("extract_time"), extract_voltage=c.get("extract_voltage"),
-                    donor_composition=c.get("donor_composition") or "",
-                    acceptor_composition=c.get("acceptor_composition") or "")
-                gc_serial[g]["group_label"] = regen or f"M{g}"
-                if not regen:
-                    _fallback_groups.append(g)
-            else:
-                gc_serial[g]["group_label"] = cur_label
-        M.save_group_conditions(conn, eid, base_serial, gc_serial)
-        # 构建电压表数据：把选中的电流 sheet 数据同步写入 DATA.xlsx（全部选中记录都写入）
-        voltage_df = build_voltage_df(st.session_state.get("ne_current_sheets") or [])
-        EB.build_excel(data_xlsx, res3, meta, meta["Va"], meta["Vd"], bool(meta["use_sample"]),
-                       voltage_df=voltage_df,
-                       gcond=M.get_group_conditions(conn, eid),
-                       excluded_samples=_saved_excl_re,
-                       qc_by_group=_gqc_submit, default_qc=_default_qc_submit)
-        n_pts = len(voltage_df) if voltage_df is not None else 0
-        # 生成成功（含 Excel 落盘）后才清编辑备份：若 build_excel 抛异常（如 xlsx 被占用），
-        # 用户原地重试时表格编辑仍在，不会被迫重填
-        st.session_state.pop("_ne_qtbl_edits", None)
-        st.session_state.pop("_ne_qtbl_edits_sig", None)
-        st.toast("✅ 生成完成！", icon="✅")
-        st.success(f"✅ 完成！Excel：`{data_xlsx}`  实验ID：{eid}"
-                   + (f"（电压表已写入 {n_pts} 点电流数据；组条件已同步）" if n_pts else "（组条件已同步）"))
-        if _fallback_groups and exp_type.get("key") in N.EXP_TYPE_PREFIX:
-            st.warning(
-                "⚠️ 组 " + "、".join(f"M{g}" for g in _fallback_groups)
-                + " 没有可用的 SLM/膜组成信息，组别名只能用 M组号。"
-                "请在「基准条件」或各组设置里填好 SLM 后重新生成本文件夹（组别名会自动补全），"
-                "或到「实验详情→修改/删除」手动填写组别名。")
-        # 标记进入标准品剔除步骤
-        st.session_state["_std_check_eid"] = eid
-        st.session_state["_std_check_folder"] = sel
+                base_serial[k] = _ser(base_serial.get(k, []))
+            gc_serial = {}
+            _fallback_groups = []  # 自动命名退回 M组号 的组（缺 SLM 信息），生成后提示
+            for g, c in group_full.items():
+                gc_serial[g] = {**c}
+                for k in ["slm_additives", "donor_additives", "acceptor_additives", "note_tags",
+                          "well_position", "abnormal_wells"]:
+                    gc_serial[g][k] = _ser(gc_serial[g].get(k, []))
+                # 组别名：None=自动 → 按该组实际条件生成；否则用户手动指定
+                cur_label = c.get("group_label")
+                if cur_label is None or str(cur_label).strip() == "":
+                    regen = N.generate_group_label(exp_type["key"],
+                        slm_main=gc_serial[g].get("slm_main"), slm_additives=c.get("slm_additives"),
+                        pH_donor=c.get("pH_donor"), donor_additives=c.get("donor_additives"),
+                        pH_acceptor=c.get("pH_acceptor"), acceptor_additives=c.get("acceptor_additives"),
+                        extract_time=c.get("extract_time"), extract_voltage=c.get("extract_voltage"),
+                        donor_composition=c.get("donor_composition") or "",
+                        acceptor_composition=c.get("acceptor_composition") or "")
+                    gc_serial[g]["group_label"] = regen or f"M{g}"
+                    if not regen:
+                        _fallback_groups.append(g)
+                else:
+                    gc_serial[g]["group_label"] = cur_label
+            M.save_group_conditions(conn, eid, base_serial, gc_serial)
+            # 构建电压表数据：把选中的电流 sheet 数据同步写入 DATA.xlsx（全部选中记录都写入）
+            voltage_df = build_voltage_df(st.session_state.get("ne_current_sheets") or [])
+            EB.build_excel(data_xlsx, res3, meta, meta["Va"], meta["Vd"], bool(meta["use_sample"]),
+                           voltage_df=voltage_df,
+                           gcond=M.get_group_conditions(conn, eid),
+                           excluded_samples=_saved_excl_re,
+                           qc_by_group=_gqc_submit, default_qc=_default_qc_submit)
+            n_pts = len(voltage_df) if voltage_df is not None else 0
+            # 生成成功（含 Excel 落盘）后才清编辑备份：若 build_excel 抛异常（如 xlsx 被占用），
+            # 用户原地重试时表格编辑仍在，不会被迫重填
+            st.session_state.pop("_ne_qtbl_edits", None)
+            st.session_state.pop("_ne_qtbl_edits_sig", None)
+            st.toast("生成完成", icon="✅")
+            st.success(f"✅ 完成！Excel：`{data_xlsx}`  实验ID：{eid}"
+                       + (f"（电压表已写入 {n_pts} 点电流数据；组条件已同步）" if n_pts else "（组条件已同步）"))
+            if _fallback_groups and exp_type.get("key") in N.EXP_TYPE_PREFIX:
+                st.warning(
+                    "⚠️ 组 " + "、".join(f"M{g}" for g in _fallback_groups)
+                    + " 没有可用的 SLM/膜组成信息，组别名只能用 M组号。"
+                    "请在「基准条件」或各组设置里填好 SLM 后重新生成本文件夹（组别名会自动补全），"
+                    "或到「实验详情→修改/删除」手动填写组别名。")
+            # 标记进入标准品剔除步骤
+            st.session_state["_std_check_eid"] = eid
+            st.session_state["_std_check_folder"] = sel
 
-        def _ne_next_folder_cb():
-            st.session_state.pop("_ne_loaded_folder", None)
-        st.button("▶ 录入下一个文件夹", key="ne_next_folder", on_click=_ne_next_folder_cb)
+            def _ne_next_folder_cb():
+                st.session_state.pop("_ne_loaded_folder", None)
+            st.button("▶ 录入下一个文件夹", key="ne_next_folder", on_click=_ne_next_folder_cb)
     # —— 6) 标准品剔除步骤（生成后；仅对刚生成的那个文件夹显示）——
     if st.session_state.get("_std_check_folder") != sel:
         st.session_state.pop("_std_check_eid", None)
@@ -1727,13 +1710,13 @@ def page_new_experiment():
                     return _blocks
 
                 _sc_cols = st.columns([1, 1, 5])
-                if _sc_cols[0].button("🪄 保守剔除（标准品）", key="auto_std_conservative"):
+                if _sc_cols[0].button("⚡ 保守剔除（标准品）", key="auto_std_conservative"):
                     _plan = C.plan_auto_exclusion(_build_std_blocks(), {"default": 2}, mode="conservative",
                                                   min_n_gain=1, min_rsd_rel=0.05)
                     st.session_state[_auto_std_key] = _plan["excluded"]
                     st.session_state[f"_auto_std_card_{std_eid}"] = _plan
                     st.rerun()
-                if _sc_cols[1].button("🪄 激进剔除（标准品）", key="auto_std_aggressive"):
+                if _sc_cols[1].button("⚡ 激进剔除（标准品）", key="auto_std_aggressive"):
                     _plan = C.plan_auto_exclusion(_build_std_blocks(), {"default": 2}, mode="aggressive",
                                                   min_n_gain=1, min_rsd_rel=0.05)
                     st.session_state[_auto_std_key] = _plan["excluded"]
@@ -1742,7 +1725,7 @@ def page_new_experiment():
                 _sc_cols[2].caption("标准品剔除按名全局生效（影响所有使用该名的组）。保守=只剔1针且需Q达标+明显改善；激进=到下限或无改进即停。")
                 _auto_std_card = st.session_state.get(f"_auto_std_card_{std_eid}")
                 if _auto_std_card:
-                    with st.expander("🪄 自动剔除建议明细（尚未保存，核对后点下方按钮）", expanded=True):
+                    with st.expander("⚡ 自动剔除建议明细（尚未保存，核对后点下方按钮）", expanded=True):
                         for _bk, _names in _auto_std_card["excluded"].items():
                             if _names:
                                 _pc2, _nm2 = _bk
@@ -2720,11 +2703,11 @@ def render_heatmaps(mdf: pd.DataFrame, group_labels: dict, qc_df_row: pd.DataFra
                     g_num = next((gn for gn, lbl in group_labels.items()
                                   if lbl == c_g or c_g.startswith(lbl + " ⚠")), None)
                     n_excl = sum(1 for s_ in excluded
-                                 if (P.parse_sample_name(str(s_)) or (None,))[0] == g_num) \
+                                 if (pp := P.parse_sample_name(str(s_))) and pp[0] == g_num and pp[1] == 'A') \
                         if g_num is not None else 0
                     row_valid.append(max(0, n_replicates - n_excl))
                 pivot.loc["📊 有效膜数"] = row_valid
-                stat_desc += "；底部末行为各实验组有效膜数（重复数−被剔除数）"
+                stat_desc += "；底部末行为各实验组有效膜数（受体相重复数−受体相被剔除数）"
         else:
             if col == "recovery":
                 # 有效膜数 = 重复数 − 该组被剔除样本数（仅回收率显示）
@@ -2735,7 +2718,7 @@ def render_heatmaps(mdf: pd.DataFrame, group_labels: dict, qc_df_row: pd.DataFra
                     g_num = next((gn for gn, lbl in group_labels.items()
                                   if lbl == c_g or c_g.startswith(lbl + " ⚠")), None)
                     n_excl = sum(1 for s_ in excluded
-                                 if (P.parse_sample_name(str(s_)) or (None,))[0] == g_num) \
+                                 if (pp := P.parse_sample_name(str(s_))) and pp[0] == g_num and pp[1] == 'A') \
                         if g_num is not None else 0
                     row_valid.append(max(0, n_replicates - n_excl))
                 pivot.loc["📊 有效膜数"] = row_valid
@@ -3173,7 +3156,7 @@ def _exclusion_ui(eid, folder, group_labels):
     # —— 自动剔除（保守/激进）：仅预勾选，不自动保存 ——
     _auto_plan_key = f"_auto_smp_plan_{eid}"
     _ac_cols = st.columns([1, 1, 5])
-    if _ac_cols[0].button("🪄 保守剔除（样本）", key="auto_excl_conservative"):
+    if _ac_cols[0].button("⚡ 保守剔除（样本）", key="auto_excl_conservative"):
         _blocks = {}
         for g in res.groups:
             for phase in ("A", "S"):
@@ -3191,7 +3174,7 @@ def _exclusion_ui(eid, folder, group_labels):
         st.session_state[_auto_plan_key] = _plan["excluded"]
         st.session_state[f"_auto_smp_card_{eid}"] = _plan
         st.rerun()
-    if _ac_cols[1].button("🪄 激进剔除（样本）", key="auto_excl_aggressive"):
+    if _ac_cols[1].button("⚡ 激进剔除（样本）", key="auto_excl_aggressive"):
         _blocks = {}
         for g in res.groups:
             for phase in ("A", "S"):
@@ -3213,7 +3196,7 @@ def _exclusion_ui(eid, folder, group_labels):
     _auto_plan = st.session_state.get(_auto_plan_key) or {}
     _auto_card = st.session_state.get(f"_auto_smp_card_{eid}")
     if _auto_card:
-        with st.expander("🪄 自动剔除建议明细（尚未保存，核对后点下方按钮）", expanded=True):
+        with st.expander("⚡ 自动剔除建议明细（尚未保存，核对后点下方按钮）", expanded=True):
             for _bk, _names in _auto_card["excluded"].items():
                 if _names:
                     _gnum, _ph = _bk
@@ -3320,52 +3303,53 @@ def _exclusion_ui(eid, folder, group_labels):
     st.markdown("---")
     st.markdown(f"**已勾选剔除**（{len(all_excl)} 个）：{', '.join(all_excl) if all_excl else '无'}")
     if all_excl and st.button("💾 确认剔除并保存到数据库 + DATA.xlsx", type="primary", key=f"save_{eid}"):
-        # 用该实验自己的 Va/Vd/启用供体相 设置重算（不能用全局默认值），并保留标准品剔除状态
-        exp_date_row = conn.execute("SELECT exp_date, Va, Vd, use_sample, data_xlsx, temperature, humidity, column_pressure, purpose FROM experiments WHERE id=?", (eid,)).fetchone()
-        va_e = float(exp_date_row["Va"]) if exp_date_row and exp_date_row["Va"] else float(config.DEFAULT_VA)
-        vd_e = float(exp_date_row["Vd"]) if exp_date_row and exp_date_row["Vd"] else float(config.DEFAULT_VD)
-        us_e = bool(exp_date_row["use_sample"]) if exp_date_row else True
-        exp_date = exp_date_row["exp_date"] if exp_date_row else ""
-        _gqc_ex, _dqc_ex, _ = _build_group_qc_from_db(conn, eid)
-        m2 = C.compute_metrics(res.df, res.analytes, res.groups,
-                               va_e, vd_e,
-                               use_sample=us_e, excluded_samples=set(all_excl),
-                               group_qc=_gqc_ex, default_qc=_dqc_ex)
-        conn.execute("DELETE FROM metrics WHERE experiment_id=?", (eid,))
-        conn.commit()
-        M.save_metrics(conn, eid, exp_date, m2, res.analytes, res.groups)
-        M.set_excluded_samples(conn, eid, set(all_excl))  # 持久化剔除集（有效膜数等统计用）
-        fname = ""
-        try:
-            va = float(exp_date_row["Va"]) if exp_date_row["Va"] else float(config.DEFAULT_VA)
-            vd = float(exp_date_row["Vd"]) if exp_date_row["Vd"] else float(config.DEFAULT_VD)
-            us = bool(exp_date_row["use_sample"]) if exp_date_row else True
-            data_xlsx_path = Path(exp_date_row["data_xlsx"]) if exp_date_row and exp_date_row["data_xlsx"] else None
-            if data_xlsx_path:
-                _eid_row = conn.execute("SELECT current_sheets FROM experiments WHERE id=?", (eid,)).fetchone()
-                _cur_maps_x = json.loads(_eid_row["current_sheets"]) if _eid_row and _eid_row["current_sheets"] else []
-                _gqc_bx, _dqc_bx, _ = _build_group_qc_from_db(conn, eid)
-                # 完整元数据：薄 meta 会让重建的总表把温度/湿度/柱压/实验说明清成空白
-                _meta_bx = {"exp_date": exp_date,
-                            "temperature": exp_date_row["temperature"], "humidity": exp_date_row["humidity"],
-                            "column_pressure": exp_date_row["column_pressure"], "purpose": exp_date_row["purpose"]}
-                EB.build_excel(data_xlsx_path, res, _meta_bx, va, vd, us,
-                               excluded_samples=set(all_excl),
-                               gcond=M.get_group_conditions(conn, eid),
-                               voltage_df=build_voltage_df(_cur_maps_x),
-                               qc_by_group=_gqc_bx, default_qc=_dqc_bx)
-                fname = data_xlsx_path.name
-        except Exception as e:
-            st.caption(f"（Excel 同步更新失败：{e}）")
-        # 一次性提示：先存 session_state 再 rerun（直接 st.success 后 rerun 用户看不到）
-        st.toast("✅ 剔除已保存", icon="✅")
-        st.session_state[f"_excl_saved_msg_{eid}"] = (
-            f"✅ 已剔除 {len(all_excl)} 个样本，**已保存到数据库并重新生成 DATA.xlsx**"
-            + (f"（`{fname}`）" if fname else "")
-            + "。热图 tab 已同步刷新。")
-        # 清缓存使热图立即反映新数据
-        st.session_state["_excl_res_cache"].pop(folder, None)
-        st.rerun()
+        with st.spinner("正在剔除重算并更新 DATA.xlsx（约 10~60 秒）..."):
+            # 用该实验自己的 Va/Vd/启用供体相 设置重算（不能用全局默认值），并保留标准品剔除状态
+            exp_date_row = conn.execute("SELECT exp_date, Va, Vd, use_sample, data_xlsx, temperature, humidity, column_pressure, purpose FROM experiments WHERE id=?", (eid,)).fetchone()
+            va_e = float(exp_date_row["Va"]) if exp_date_row and exp_date_row["Va"] else float(config.DEFAULT_VA)
+            vd_e = float(exp_date_row["Vd"]) if exp_date_row and exp_date_row["Vd"] else float(config.DEFAULT_VD)
+            us_e = bool(exp_date_row["use_sample"]) if exp_date_row else True
+            exp_date = exp_date_row["exp_date"] if exp_date_row else ""
+            _gqc_ex, _dqc_ex, _ = _build_group_qc_from_db(conn, eid)
+            m2 = C.compute_metrics(res.df, res.analytes, res.groups,
+                                   va_e, vd_e,
+                                   use_sample=us_e, excluded_samples=set(all_excl),
+                                   group_qc=_gqc_ex, default_qc=_dqc_ex)
+            conn.execute("DELETE FROM metrics WHERE experiment_id=?", (eid,))
+            conn.commit()
+            M.save_metrics(conn, eid, exp_date, m2, res.analytes, res.groups)
+            M.set_excluded_samples(conn, eid, set(all_excl))  # 持久化剔除集（有效膜数等统计用）
+            fname = ""
+            try:
+                va = float(exp_date_row["Va"]) if exp_date_row["Va"] else float(config.DEFAULT_VA)
+                vd = float(exp_date_row["Vd"]) if exp_date_row["Vd"] else float(config.DEFAULT_VD)
+                us = bool(exp_date_row["use_sample"]) if exp_date_row else True
+                data_xlsx_path = Path(exp_date_row["data_xlsx"]) if exp_date_row and exp_date_row["data_xlsx"] else None
+                if data_xlsx_path:
+                    _eid_row = conn.execute("SELECT current_sheets FROM experiments WHERE id=?", (eid,)).fetchone()
+                    _cur_maps_x = json.loads(_eid_row["current_sheets"]) if _eid_row and _eid_row["current_sheets"] else []
+                    _gqc_bx, _dqc_bx, _ = _build_group_qc_from_db(conn, eid)
+                    # 完整元数据：薄 meta 会让重建的总表把温度/湿度/柱压/实验说明清成空白
+                    _meta_bx = {"exp_date": exp_date,
+                                "temperature": exp_date_row["temperature"], "humidity": exp_date_row["humidity"],
+                                "column_pressure": exp_date_row["column_pressure"], "purpose": exp_date_row["purpose"]}
+                    EB.build_excel(data_xlsx_path, res, _meta_bx, va, vd, us,
+                                   excluded_samples=set(all_excl),
+                                   gcond=M.get_group_conditions(conn, eid),
+                                   voltage_df=build_voltage_df(_cur_maps_x),
+                                   qc_by_group=_gqc_bx, default_qc=_dqc_bx)
+                    fname = data_xlsx_path.name
+            except Exception as e:
+                st.caption(f"（Excel 同步更新失败：{e}）")
+            # 一次性提示：先存 session_state 再 rerun（直接 st.success 后 rerun 用户看不到）
+            st.toast("剔除已保存", icon="✅")
+            st.session_state[f"_excl_saved_msg_{eid}"] = (
+                f"✅ 已剔除 {len(all_excl)} 个样本，**已保存到数据库并重新生成 DATA.xlsx**"
+                + (f"（`{fname}`）" if fname else "")
+                + "。热图 tab 已同步刷新。")
+            # 清缓存使热图立即反映新数据
+            st.session_state["_excl_res_cache"].pop(folder, None)
+            st.rerun()
     # rerun 后显示一次性提示（显示即清除）
     if st.session_state.get(f"_excl_saved_msg_{eid}"):
         st.success(st.session_state[f"_excl_saved_msg_{eid}"])
@@ -3561,7 +3545,7 @@ def _edit_experiment_ui(eid, row, folder):
             dev = (row_sum - mean_sum).abs() / (abs(mean_sum) if mean_sum else 1)
             worst = dev.idxmax()
             st.warning(f"🔴 推荐剔除（偏离最大）：**{worst}**（偏离度 {dev.max():.3f}）")
-            if st.button("🪄 自动剔除（保守）", key=f"auto_std_ed_{keyp}_{eid}",
+            if st.button("⚡ 自动剔除（保守）", key=f"auto_std_ed_{keyp}_{eid}",
                          help="按 Dixon Q 离群证据自动预勾选一根针；可手动调整"):
                 _units3 = {idx: {a: (float(v) if pd.notna(v) else None) for a, v in row.items()}
                            for idx, row in mat.iterrows()}
@@ -3675,7 +3659,7 @@ def _edit_experiment_ui(eid, row, folder):
                         width="stretch", hide_index=True)
 
         # 保存结果一次性提示（按钮在下方：保存修改并重新生成 DATA.xlsx）
-        st.toast("✅ 修改已保存", icon="✅")
+        st.toast("修改已保存", icon="✅")
         msg_key_ed2 = f"_ed_regen_msg_{eid}"
         if st.session_state.get(msg_key_ed2):
             st.success(st.session_state[msg_key_ed2])
@@ -3685,82 +3669,83 @@ def _edit_experiment_ui(eid, row, folder):
         st.caption(f"（标准品数据加载失败：{e}）")
 
     if st.button("💾 保存修改并重新生成 DATA.xlsx", type="primary", key=f"ed_regen_{eid}"):
-        conn.execute(
-            "UPDATE experiments SET temperature=?, humidity=?, column_pressure=?, Va=?, Vd=?, purpose=?, current_sheets=? WHERE id=?",
-            (new_temp, new_hum, new_cp, new_va, new_vd, new_purpose,
-             json.dumps(st.session_state.get(f"ed_current_sheets_{eid}") or [], ensure_ascii=False), eid))
-        if len(gcond):
-            # 更新组别名 + 组级条件（含异常标签/孔位）
-            for grp, gc_new in new_group_conds.items():
-                set_clause = ("group_label=?, slm_main=?, pH_donor=?, donor_composition=?, donor_buffer_conc=?, "
-                              "donor_additive_conc=?, pH_acceptor=?, acceptor_composition=?, acceptor_buffer_conc=?, "
-                              "acceptor_additive_conc=?, extract_time=?, extract_voltage=?, note_tags=?, well_position=?, abnormal_wells=?, qc_combo=?")
-                vals = [new_labels.get(grp, f"M{grp}"),
-                        gc_new.get("slm_main"), gc_new.get("pH_donor"), gc_new.get("donor_composition"),
-                        gc_new.get("donor_buffer_conc"), gc_old_pass.get(grp, {}).get("donor_additive_conc"),
-                        gc_new.get("pH_acceptor"), gc_new.get("acceptor_composition"),
-                        gc_new.get("acceptor_buffer_conc"), gc_old_pass.get(grp, {}).get("acceptor_additive_conc"),
-                        gc_new.get("extract_time"), gc_new.get("extract_voltage"),
-                        json.dumps(gc_new.get("note_tags") or [], ensure_ascii=False),
-                        json.dumps(gc_new.get("well_position") or [], ensure_ascii=False),
-                        json.dumps(gc_new.get("abnormal_wells") or [], ensure_ascii=False),
-                        gc_new.get("qc_combo") or ""]
-                conn.execute(f"UPDATE group_conditions SET {set_clause} WHERE experiment_id=? AND grp=?",
-                             tuple(vals) + (eid, grp))
-        conn.commit()
-        # 标准品针剔除：随本次保存一并落库（联动扩展后按相存储；UI 未加载成功则保持原状）
-        # 标准品组合配置随保存落库
-        _combos_final_ed = st.session_state.get(f"ed_{eid}_qc_combos", _combos_new_ed) if _multi_ed else None
-        conn.execute("UPDATE experiments SET qc_combos=? WHERE id=?",
-                     (json.dumps(_combos_final_ed, ensure_ascii=False) if _multi_ed and _combos_final_ed else None, eid))
-        conn.commit()
-        if std_ui_ok:
-            # 与步骤6 同语义：本次矩阵中出现并勾选=保留；出现未勾选=恢复；矩阵未出现的旧针=保留
-            # （防止历史剔除的标准品名从本次解析中消失时被全量覆盖清空）
-            _final_std_ed = {}
-            for _pc_ed in ("std_acceptor", "std_donor"):
-                _new_ed = set(_pairs_by_phase_ed.get(_pc_ed) or [])
-                _old_ed = set(_std_excl_saved.get(_pc_ed) or set())
-                _seen_ed = {(s, i) for s, i in _old_ed if s in _std_names_by_phase_ed.get(_pc_ed, set())}
-                _final_std_ed[_pc_ed] = list(_new_ed | (_old_ed - _seen_ed))
-            M.set_excluded_std(conn, eid,
-                               std_acceptor=_final_std_ed.get("std_acceptor"),
-                               std_donor=_final_std_ed.get("std_donor"))
-        try:
-            res = _load_calc_res(conn, eid, folder)  # 带 qc_names + 刚保存的标准品针剔除
-            _saved_sample_excl3 = M.get_excluded_samples(conn, eid)
-            _gqc_ed, _dqc_ed, _ = _build_group_qc_from_db(conn, eid)
-            metrics = C.compute_metrics(res.df, res.analytes, res.groups, new_va, new_vd,
-                                        use_sample=bool(row["use_sample"]),
-                                        excluded_samples=_saved_sample_excl3,
-                                        group_qc=_gqc_ed, default_qc=_dqc_ed)
-            data_xlsx = folder_path / f"{row['exp_date'] or res.file_date}-DATA.xlsx"
-            meta = {"exp_date": row["exp_date"],
-                    "temperature": new_temp, "humidity": new_hum, "column_pressure": new_cp,
-                    "Va": new_va, "Vd": new_vd, "purpose": new_purpose}
-            # 同步：电流记录 + 组条件（含备注/标签/孔位）一并写入 DATA.xlsx
-            # （用刚保存的选择，而不是 row 里本轮更新前的旧值）
-            _cur_maps = st.session_state.get(f"ed_current_sheets_{eid}") or []
-            EB.build_excel(data_xlsx, res, meta, new_va, new_vd, bool(row["use_sample"]),
-                           voltage_df=build_voltage_df(_cur_maps),
-                           gcond=M.get_group_conditions(conn, eid),
-                           excluded_samples=_saved_sample_excl3,
-                           qc_by_group=_gqc_ed, default_qc=_dqc_ed)
-            conn.execute("DELETE FROM metrics WHERE experiment_id=?", (eid,))
-            conn.execute("DELETE FROM qc_summary WHERE experiment_id=?", (eid,))
-            M.save_metrics(conn, eid, row["exp_date"], metrics, res.analytes, res.groups)
-            M.save_qc_summary(conn, eid, row["exp_date"], res, res.analytes, default_qc=_dqc_ed)
-            st.session_state.get("_excl_res_cache", {}).pop(folder, None)
-            _n_acc_m = len(_pairs_by_phase_ed.get("std_acceptor") or []) if std_ui_ok else 0
-            _n_don_m = len(_pairs_by_phase_ed.get("std_donor") or []) if std_ui_ok else 0
-            st.session_state[f"_ed_regen_msg_{eid}"] = (
-                f"✅ 已保存并重新生成 `{data_xlsx.name}`：元数据/组条件已更新，"
-                f"标准品剔除（受体相 {_n_acc_m} 针、供体相 {_n_don_m} 针，含联动）已应用，"
-                f"均值/RSD/回收率已重算。")
-            st.rerun()
-        except Exception as e:
-            conn.rollback()
-            st.error(f"重新生成失败：{e}")
+        with st.spinner("正在保存修改并重新生成 DATA.xlsx（约 10~60 秒）..."):
+            conn.execute(
+                "UPDATE experiments SET temperature=?, humidity=?, column_pressure=?, Va=?, Vd=?, purpose=?, current_sheets=? WHERE id=?",
+                (new_temp, new_hum, new_cp, new_va, new_vd, new_purpose,
+                 json.dumps(st.session_state.get(f"ed_current_sheets_{eid}") or [], ensure_ascii=False), eid))
+            if len(gcond):
+                # 更新组别名 + 组级条件（含异常标签/孔位）
+                for grp, gc_new in new_group_conds.items():
+                    set_clause = ("group_label=?, slm_main=?, pH_donor=?, donor_composition=?, donor_buffer_conc=?, "
+                                  "donor_additive_conc=?, pH_acceptor=?, acceptor_composition=?, acceptor_buffer_conc=?, "
+                                  "acceptor_additive_conc=?, extract_time=?, extract_voltage=?, note_tags=?, well_position=?, abnormal_wells=?, qc_combo=?")
+                    vals = [new_labels.get(grp, f"M{grp}"),
+                            gc_new.get("slm_main"), gc_new.get("pH_donor"), gc_new.get("donor_composition"),
+                            gc_new.get("donor_buffer_conc"), gc_old_pass.get(grp, {}).get("donor_additive_conc"),
+                            gc_new.get("pH_acceptor"), gc_new.get("acceptor_composition"),
+                            gc_new.get("acceptor_buffer_conc"), gc_old_pass.get(grp, {}).get("acceptor_additive_conc"),
+                            gc_new.get("extract_time"), gc_new.get("extract_voltage"),
+                            json.dumps(gc_new.get("note_tags") or [], ensure_ascii=False),
+                            json.dumps(gc_new.get("well_position") or [], ensure_ascii=False),
+                            json.dumps(gc_new.get("abnormal_wells") or [], ensure_ascii=False),
+                            gc_new.get("qc_combo") or ""]
+                    conn.execute(f"UPDATE group_conditions SET {set_clause} WHERE experiment_id=? AND grp=?",
+                                 tuple(vals) + (eid, grp))
+            conn.commit()
+            # 标准品针剔除：随本次保存一并落库（联动扩展后按相存储；UI 未加载成功则保持原状）
+            # 标准品组合配置随保存落库
+            _combos_final_ed = st.session_state.get(f"ed_{eid}_qc_combos", _combos_new_ed) if _multi_ed else None
+            conn.execute("UPDATE experiments SET qc_combos=? WHERE id=?",
+                         (json.dumps(_combos_final_ed, ensure_ascii=False) if _multi_ed and _combos_final_ed else None, eid))
+            conn.commit()
+            if std_ui_ok:
+                # 与步骤6 同语义：本次矩阵中出现并勾选=保留；出现未勾选=恢复；矩阵未出现的旧针=保留
+                # （防止历史剔除的标准品名从本次解析中消失时被全量覆盖清空）
+                _final_std_ed = {}
+                for _pc_ed in ("std_acceptor", "std_donor"):
+                    _new_ed = set(_pairs_by_phase_ed.get(_pc_ed) or [])
+                    _old_ed = set(_std_excl_saved.get(_pc_ed) or set())
+                    _seen_ed = {(s, i) for s, i in _old_ed if s in _std_names_by_phase_ed.get(_pc_ed, set())}
+                    _final_std_ed[_pc_ed] = list(_new_ed | (_old_ed - _seen_ed))
+                M.set_excluded_std(conn, eid,
+                                   std_acceptor=_final_std_ed.get("std_acceptor"),
+                                   std_donor=_final_std_ed.get("std_donor"))
+            try:
+                res = _load_calc_res(conn, eid, folder)  # 带 qc_names + 刚保存的标准品针剔除
+                _saved_sample_excl3 = M.get_excluded_samples(conn, eid)
+                _gqc_ed, _dqc_ed, _ = _build_group_qc_from_db(conn, eid)
+                metrics = C.compute_metrics(res.df, res.analytes, res.groups, new_va, new_vd,
+                                            use_sample=bool(row["use_sample"]),
+                                            excluded_samples=_saved_sample_excl3,
+                                            group_qc=_gqc_ed, default_qc=_dqc_ed)
+                data_xlsx = folder_path / f"{row['exp_date'] or res.file_date}-DATA.xlsx"
+                meta = {"exp_date": row["exp_date"],
+                        "temperature": new_temp, "humidity": new_hum, "column_pressure": new_cp,
+                        "Va": new_va, "Vd": new_vd, "purpose": new_purpose}
+                # 同步：电流记录 + 组条件（含备注/标签/孔位）一并写入 DATA.xlsx
+                # （用刚保存的选择，而不是 row 里本轮更新前的旧值）
+                _cur_maps = st.session_state.get(f"ed_current_sheets_{eid}") or []
+                EB.build_excel(data_xlsx, res, meta, new_va, new_vd, bool(row["use_sample"]),
+                               voltage_df=build_voltage_df(_cur_maps),
+                               gcond=M.get_group_conditions(conn, eid),
+                               excluded_samples=_saved_sample_excl3,
+                               qc_by_group=_gqc_ed, default_qc=_dqc_ed)
+                conn.execute("DELETE FROM metrics WHERE experiment_id=?", (eid,))
+                conn.execute("DELETE FROM qc_summary WHERE experiment_id=?", (eid,))
+                M.save_metrics(conn, eid, row["exp_date"], metrics, res.analytes, res.groups)
+                M.save_qc_summary(conn, eid, row["exp_date"], res, res.analytes, default_qc=_dqc_ed)
+                st.session_state.get("_excl_res_cache", {}).pop(folder, None)
+                _n_acc_m = len(_pairs_by_phase_ed.get("std_acceptor") or []) if std_ui_ok else 0
+                _n_don_m = len(_pairs_by_phase_ed.get("std_donor") or []) if std_ui_ok else 0
+                st.session_state[f"_ed_regen_msg_{eid}"] = (
+                    f"✅ 已保存并重新生成 `{data_xlsx.name}`：元数据/组条件已更新，"
+                    f"标准品剔除（受体相 {_n_acc_m} 针、供体相 {_n_don_m} 针，含联动）已应用，"
+                    f"均值/RSD/回收率已重算。")
+                st.rerun()
+            except Exception as e:
+                conn.rollback()
+                st.error(f"重新生成失败：{e}")
 
 
 # ========================================================

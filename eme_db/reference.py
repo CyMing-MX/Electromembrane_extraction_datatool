@@ -276,6 +276,22 @@ def _analyte_info_cached(analyte: str) -> Optional[pd.Series]:
     return None
 
 
+def resolve_logp_column(cols) -> Optional[str]:
+    """按【文件列顺序】返回第一个 LogP 匹配列。
+    匹配规则：① 精确别名（c-logp / logp，大小写不敏感）优先；
+    ② 否则取名称含 "logp" 的列中最早出现的（如 logP_pubchem 在
+    logP_comptox 之前 → 以 pubchem 为准）。cols 须保持文件列顺序。"""
+    lower = [(str(c).strip().lower(), str(c)) for c in cols]
+    for alias in ("c-logp", "logp"):
+        for low, orig in lower:
+            if low == alias:
+                return orig
+    for low, orig in lower:
+        if "logp" in low:
+            return orig
+    return None
+
+
 def get_analyte_info(analyte: str) -> Optional[pd.Series]:
     """按物质名查基本信息（自动归一化匹配；lru 缓存，信息库刷新时清除）"""
     cached = _analyte_info_cached(str(analyte))

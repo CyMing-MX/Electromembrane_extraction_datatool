@@ -465,7 +465,11 @@ def get_std_rsd_by_analyte(df: pd.DataFrame, analytes: list[str]) -> dict[str, f
 #   超阈(>15%)个数 与 累加值。
 
 _DIXON_Q_CRIT_95 = {3: 0.941, 4: 0.765, 5: 0.642, 6: 0.560,
-                    7: 0.507, 8: 0.468, 9: 0.437, 10: 0.412}
+                    7: 0.507, 8: 0.468, 9: 0.437, 10: 0.412,
+                    11: 0.397, 12: 0.383, 13: 0.371, 14: 0.360,
+                    15: 0.349, 16: 0.339, 17: 0.330, 18: 0.321,
+                    19: 0.313, 20: 0.305}
+_DIXON_Q_CRIT_LARGE_N = 0.30  # n>20 时沿用（针数极少到这个规模）
 
 
 def _dixon_q(vals: list[float], unit_key) -> float:
@@ -474,7 +478,6 @@ def _dixon_q(vals: list[float], unit_key) -> float:
     取候选在各物质上的最大 Q（候选只要在某物质上是统计离群即算有证据），
     并附带 driving 物质名。返回 (q, analyte)。"""
     units = list(vals.keys())
-    idx = units.index(unit_key)
     analytes = set()
     for u in units:
         analytes |= {a for a, v in vals[u].items() if v is not None and not (isinstance(v, float) and v != v)}
@@ -485,7 +488,7 @@ def _dixon_q(vals: list[float], unit_key) -> float:
         n = len(series)
         if n < 3:
             continue
-        q_crit = _DIXON_Q_CRIT_95.get(min(n, 10), 0.40)
+        q_crit = _DIXON_Q_CRIT_95.get(n, _DIXON_Q_CRIT_LARGE_N)
         s = sorted(series)
         rng = s[-1] - s[0]
         if rng <= 0:
@@ -563,15 +566,24 @@ def plan_auto_exclusion(blocks: dict, floors: dict, mode: str = "conservative",
         return {bk: _block_stats(vals_all[bk], excluded[bk]) for bk in blocks}
 
     def _best_candidate():
-        best = None
+        """在 Q 检验合格（q>0）的候选中按（Δ超阈↓, ΔRSD累加↓, Q↓）选最优；
+        同时返回"改善最大但无离群证据"的候选供 blocked 提示。
+        双通道 Q：逐物质通道 + 行总和通道（与人工"偏离度"口径一致）。"""
+        qualified, unqualified = [], []
         for bk in blocks:
             cur_n, cur_sum, _ = _block_stats(vals_all[bk], excluded[bk])
             n_units = len(vals_all[bk]) - len(excluded[bk])
             if n_units <= floor_of[bk]:
                 continue
             _live = {u: vals_all[bk][u] for u in vals_all[bk] if u not in excluded[bk]}
+            _sums = {u: sum(v for v in _live[u].values() if v is not None) for u in _live}
             for uk in _live:
-                q, qa = _dixon_q(_live, uk)
+                q1, qa1 = _dixon_q(_live, uk)
+                q2, _ = _dixon_q({u: {"__rowsum__": sm} for u, sm in _sums.items()}, uk)
+                if q2 > q1:
+                    q, qa = q2, "峰面积总和"
+                else:
+                    q, qa = q1, qa1
                 after_n, after_sum, _ = _block_stats(vals_all[bk], excluded[bk] | {uk})
                 d_n = cur_n - after_n
                 d_sum = cur_sum - after_sum
@@ -579,22 +591,33 @@ def plan_auto_exclusion(blocks: dict, floors: dict, mode: str = "conservative",
                 cand = {"block": bk, "unit": uk, "q": q, "q_analyte": qa,
                         "d_n": d_n, "d_sum": d_sum, "d_rel": d_rel,
                         "before": (cur_n, cur_sum), "after": (after_n, after_sum)}
-                if best is None:
-                    best = cand
-                    continue
-                # 字典序：Δ超阈 ↓ 优先，其次 ΔRSD累加 ↓，其次 Q ↓
-                if (cand["d_n"], cand["d_sum"], cand["q"]) > (best["d_n"], best["d_sum"], best["q"]):
-                    best = cand
-        return best
+                (qualified if q > 0 else unqualified).append(cand)
+        if qualified:
+            best = max(qualified, key=lambda c: (c["d_n"], c["d_sum"], c["q"]))
+            # 透明提示：改善更大但无离群证据的候选
+            if unqualified:
+                best_uq = max(unqualified, key=lambda c: (c["d_n"], c["d_sum"]))
+                if (best_uq["d_n"], best_uq["d_sum"]) > (best["d_n"], best["d_sum"]):
+                    best_uq = {**best_uq,
+                               "reason": "改善更大但 Q 检验不达标（非统计离群），已按规则不剔除"}
+                    return best, best_uq
+            return best, None
+        if unqualified:
+            worst_uq = max(unqualified, key=lambda c: (c["d_n"], c["d_sum"]))
+            worst_uq = {**worst_uq, "reason": "全部候选 Q 检验不达标（无统计离群点），不剔除"}
+            return None, worst_uq
+        return None, None
 
     if mode == "conservative":
-        best = _best_candidate()
+        best, blocked_cand = _best_candidate()
+        if blocked_cand:
+            blocked.append(blocked_cand)
         if best is None:
             return {"excluded": excluded, "steps": [], "before": before,
                     "after": _all_stats(), "blocked": blocked}
-        # Q 检验（_dixon_q 内部已按各物质 n 对照 95% 临界值，q=0 即无离群证据）
-        if not best["q"]:
-            blocked.append({**best, "reason": "Q 检验不达标（候选不是块内统计离群点）"})
+        # 护栏：不允许剔除后超阈物质数恶化
+        if best["d_n"] < 0:
+            blocked.append({**best, "reason": "剔除会使超阈物质数增加，已拦截"})
             return {"excluded": excluded, "steps": [], "before": before,
                     "after": _all_stats(), "blocked": blocked}
         accepts = (best["d_n"] >= min_n_gain) or (best["d_rel"] >= min_rsd_rel)
@@ -609,16 +632,17 @@ def plan_auto_exclusion(blocks: dict, floors: dict, mode: str = "conservative",
 
     # aggressive
     while True:
-        stats = _all_stats()
-        best = _best_candidate()
+        best, blocked_cand = _best_candidate()
+        if blocked_cand:
+            blocked.append(blocked_cand)
         if best is None:
             break
-        # 停止条件：无改进
-        if best["d_n"] <= 0 and best["d_rel"] < stop_rel:
+        # 护栏：不允许超阈恶化
+        if best["d_n"] < 0:
+            blocked.append({**best, "reason": "剔除会使超阈物质数增加，停止"})
             break
-        # 停止条件：最优候选 Q 不达标
-        if not best["q"]:
-            blocked.append({**best, "reason": "Q 检验不达标，停止继续剔除"})
+        # 停止条件：无改进（超阈不降 且 RSD累加降幅不足）
+        if best["d_n"] <= 0 and best["d_rel"] < stop_rel:
             break
         excluded[best["block"]].add(best["unit"])
         steps.append({**best, "mode": "aggressive"})
