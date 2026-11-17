@@ -99,10 +99,21 @@ def _match_column(actual: str, candidates: list[str]) -> bool:
 
 
 def _col_map(columns: list[str]) -> dict:
-    """把实际表头映射到标准字段名"""
+    """把实际表头映射到标准字段名。两轮匹配：先全表精确命中，再子串回退——
+    防止 "Component" 子串抢占 "Component Group Name"（列序在前时曾致整表静默清空）"""
     mapping = {}
     used = set()
     for std_field, cands in _ALLDATA_COLS.items():
+        for col in columns:
+            if col in used:
+                continue
+            if col.strip().lower() in [c.lower() for c in cands]:
+                mapping[std_field] = col
+                used.add(col)
+                break
+    for std_field, cands in _ALLDATA_COLS.items():
+        if std_field in mapping:
+            continue
         for col in columns:
             if col in used:
                 continue
@@ -359,14 +370,25 @@ def parse_experiment(
         def _ion_idx(comp: str) -> int:
             m = re.search(r"-(\d+)$", comp or "")
             return int(m.group(1)) if m else 0
+        _raw_backup = raw.copy()
         raw["_ion"] = raw["component"].map(_ion_idx)
         before = len(raw)
         # 同一物质若无指定离子对，保留 ion 最大者退化处理：仅保留 == ion_pair
         raw = raw[raw["_ion"] == ion_pair].copy()
         dropped = before - len(raw)
-        if dropped:
-            warnings.append(f"已保留第 {ion_pair} 离子对，过滤掉 {dropped} 行其它离子对数据")
-        raw.drop(columns=["_ion"], inplace=True)
+        if dropped == before and before > 0:
+            # 全部行都被过滤（导出无 -N 离子对后缀）→ 保留全部行并警告，
+            # 而不是静默产出空表（曾致 analytes=[] 的难排查失败）
+            raw = _raw_backup.copy()
+        if dropped == before and before > 0:
+            raw = _raw_backup.copy()
+            warnings.append("导出的 Component Name 不含 -1/-2 离子对后缀，已跳过离子对过滤并保留全部行；"
+                            "若物质识别异常请检查导出设置")
+        else:
+            if dropped:
+                warnings.append(f"已保留第 {ion_pair} 离子对，过滤掉 {dropped} 行其它离子对数据")
+        if "_ion" in raw.columns:
+            raw.drop(columns=["_ion"], inplace=True)
 
     # —— 3. 分类：sample / std_acceptor / std_donor / blk_acceptor / blk_donor ——
     _sample_rx = compile_sample_pattern(sample_pattern) if sample_pattern else get_sample_re()

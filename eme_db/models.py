@@ -418,7 +418,8 @@ def delete_experiment(conn: sqlite3.Connection, experiment_id: int):
             if r["image"]:
                 try:
                     # image 存的是相对 DATA_DIR 的路径（experiments/<folder>/xxx.png）
-                    _p = DATA_DIR / r["image"] if not _os.path.isabs(r["image"]) else Path(r["image"])
+                    import config as _cfg
+                    _p = _cfg.DATA_DIR / r["image"] if not _os.path.isabs(r["image"]) else Path(r["image"])
                     if _p.exists():
                         _p.unlink()
                 except OSError:

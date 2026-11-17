@@ -472,7 +472,7 @@ _DIXON_Q_CRIT_95 = {3: 0.941, 4: 0.765, 5: 0.642, 6: 0.560,
 _DIXON_Q_CRIT_LARGE_N = 0.30  # n>20 时沿用（针数极少到这个规模）
 
 
-def _dixon_q(vals: list[float], unit_key) -> float:
+def _dixon_q(vals: dict, unit_key) -> tuple:
     """候选单元的 Dixon Q 值：只有块内极值才可能离群；非极值返回 0。
     vals 为 {unit_key: {analyte: 值}} 展开前的逐物质比较——对每个物质算 Q，
     取候选在各物质上的最大 Q（候选只要在某物质上是统计离群即算有证据），
@@ -508,9 +508,10 @@ def _dixon_q(vals: list[float], unit_key) -> float:
     return best_q, best_a
 
 
-def _block_stats(vals: dict, excluded: set, threshold: float = 15.0):
+def _block_stats(vals: dict, excluded: set, threshold: float = None):
     """块统计：excluded 为被剔 unit_key 集合。返回 (n_over, rsd_sum, {analyte: rsd})。
     每物质有效值 <2 个时 RSD 记 0（与主表口径一致，不计入超阈）。"""
+    threshold = config.RSD_THRESHOLD if threshold is None else threshold
     analytes = set()
     for u in vals:
         analytes |= set(vals[u].keys())
@@ -541,12 +542,12 @@ def plan_auto_exclusion(blocks: dict, floors: dict, mode: str = "conservative",
 
     blocks  : {block_key: {"units": {unit_key: {analyte: 峰面积或None}},
                            "floor": int}}     floor=该块允许保留的最少单元数
-    floors  : 未指定块级 floor 时的缺省（如 {"std": 2, "sample": 2}）
+    floors  : 缺省 floor（{"default": 2}；块级 "floor" 键优先于缺省）
     mode    : "conservative" | "aggressive"
     min_n_gain / min_rsd_rel : 保守模式接受阈值（超阈↓个数 / RSD累加相对降幅）
     stop_rel: 激进模式"无改进"判据（RSD累加相对降幅低于此即停）
 
-    返回 {"excluded": {block_key: [unit_key...]},          # 建议剔除（按执行顺序）
+    返回 {"excluded": {block_key: set[unit_key]},           # 建议剔除（按执行顺序）
           "steps": [{...审计信息...}],
           "before": {block_key: (n_over, rsd_sum)},
           "after":  {block_key: (n_over, rsd_sum)},

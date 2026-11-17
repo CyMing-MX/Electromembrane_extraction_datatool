@@ -45,7 +45,7 @@ def _ratio_re():
     import re as _re
     if "rx" not in _RATIO_RE_CACHE:
         _RATIO_RE_CACHE["rx"] = _re.compile(
-            r"\s*[(（]\d+(?:\.\d+)?\s*(?:%|mM|μM|uM|µM|M|mg/L|g/L|μg/L|ug/L)?\s*[)）]\s*$",
+            r"\s*[(（]\s*\d+(?:\.\d+)?\s*(?:%|mM|μM|uM|µM|M|mg/L|g/L|μg/L|ug/L|mg·L-1)?\s*[)）]\s*$",
             _re.IGNORECASE)
     return _RATIO_RE_CACHE["rx"]
 

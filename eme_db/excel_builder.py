@@ -916,7 +916,9 @@ def write_data_summary_sheet(wb: Workbook, metrics: list, gcond: Optional[pd.Dat
         # 组头两行：M{n} / 组别名
         ws.cell(row=row, column=1, value="物质").font = Font(bold=True)
         ws.cell(row=row, column=2, value="LogP").font = Font(bold=True)
-        ws.cell(row=row, column=3, value="保留时间（min）").font = Font(bold=True)
+        _rt_hdr = ws.cell(row=row, column=3, value="保留时间（min）")
+        _rt_hdr.font = Font(bold=True)
+        _rt_hdr.alignment = CENTER  # 15字符 > 列宽14，自动换行防裁切
         ws.cell(row=row, column=4, value="charge@供体pH").font = Font(bold=True)
         for gi, g in enumerate(groups):
             lbl, ph, slm = grp_info.get(g, (f"M{g}", None, ""))

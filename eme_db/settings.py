@@ -294,11 +294,20 @@ def get_buffer_salt_table() -> list:
 def save_buffer_salt_table(rows: list):
     """保存缓冲盐表"""
     user = load_settings()
+    import math as _math
     clean = []
     for r in rows:
-        if isinstance(r, dict) and r.get("名称"):
-            clean.append({"名称": str(r["名称"]),
-                          "分子量(g/mol)": float(r.get("分子量(g/mol)") or 0)})
+        if not isinstance(r, dict):
+            continue
+        nm = r.get("名称")
+        if nm is None or (isinstance(nm, float) and _math.isnan(nm)):
+            continue  # NaN 名称（空行）直接丢弃
+        nm = str(nm).strip()
+        if not nm or nm == "nan":
+            continue
+        mw = r.get("分子量(g/mol)")
+        mw = float(mw) if mw is not None and not (isinstance(mw, float) and _math.isnan(mw)) else 0.0
+        clean.append({"名称": nm, "分子量(g/mol)": mw})
     user["buffer_salt_table"] = clean
     save_settings(user)
 
@@ -319,12 +328,22 @@ def get_reagent_table() -> list:
 def save_reagent_table(rows: list):
     """保存试剂表（仅保存与内置不同的自定义行？——简化：整表保存）"""
     user = load_settings()
+    import math as _math
     clean = []
     for r in rows:
-        if isinstance(r, dict) and r.get("名称"):
-            clean.append({"名称": str(r["名称"]),
-                          "分子量(g/mol)": float(r.get("分子量(g/mol)") or 0),
-                          "密度(g/mL)": float(r.get("密度(g/mL)") or 0)})
+        if not isinstance(r, dict):
+            continue
+        nm = r.get("名称")
+        if nm is None or (isinstance(nm, float) and _math.isnan(nm)):
+            continue
+        nm = str(nm).strip()
+        if not nm or nm == "nan":
+            continue
+        mw = r.get("分子量(g/mol)")
+        mw = float(mw) if mw is not None and not (isinstance(mw, float) and _math.isnan(mw)) else 0.0
+        dens = r.get("密度(g/mL)")
+        dens = float(dens) if dens is not None and not (isinstance(dens, float) and _math.isnan(dens)) else 0.0
+        clean.append({"名称": nm, "分子量(g/mol)": mw, "密度(g/mL)": dens})
     user["reagent_table"] = clean
     save_settings(user)
 

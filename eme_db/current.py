@@ -35,8 +35,8 @@ def _parse_current_value(text) -> tuple[float, str]:
     支持科学计数法（1.62E-4 mA）；µ/μ 两种微符号均识别。"""
     if text is None:
         return None, ""
-    s = str(text).strip()
-    m = re.search(r"(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*(mA|uA|µA|μA|A)", s, re.IGNORECASE)
+    s = str(text).strip().replace(",", "")  # 千分位（1,234.5 mA）
+    m = re.search(r"(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*(mA|uA|µA|μA|A)", s, re.IGNORECASE)
     if not m:
         return None, ""
     val = float(m.group(1))

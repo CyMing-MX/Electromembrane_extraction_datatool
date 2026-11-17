@@ -954,7 +954,8 @@ def page_new_experiment():
                    "主SLM": _slm_cell0,
                    "供体相pH": float(base["pH_donor"]), "受体相pH": float(base["pH_acceptor"]),
                    "萃取时间(分钟)": float(base["extract_time"]),
-                   "萃取电压(V)": float(base["extract_voltage"])}
+                   "萃取电压(V)": float(base["extract_voltage"]),
+                   "备注(手动输入)": ""}  # 保证列恒存在：详细→快速切换后无备注组不再 KeyError/nan
             if _r_af is not None:
                 # 主SLM（剥比例后须在选项内，否则保持基准——SelectboxColumn 值必须合法）
                 _slm_cell_af = R._strip_ratio(str(_r_af.get("slm_main") or ""))
@@ -1238,9 +1239,11 @@ def page_new_experiment():
             # 标准品组合：保留逐组详细模式中的选择；无详细状态时保留数据库已存组合
             # （否则老实验在快速表格模式下重新生成会把各组组合清成默认）
             _gc_det_qc = _det_map.get(int(g)) if _apply_det else None
+            # 详细模式设置的组合无表格列 → 跨轮保留（否则第2轮起静默回退默认组合）
+            _det_qc_combo = (_det_map.get(int(g)) or {}).get("qc_combo")
             _af_qc = str(_r_af.get("qc_combo")) if _r_af is not None and _r_af.get("qc_combo") else ""
             gc["qc_combo"] = (str(_gc_det_qc.get("qc_combo")) if _gc_det_qc is not None and _gc_det_qc.get("qc_combo")
-                              else _af_qc)
+                              else (_det_qc_combo or _af_qc))
             _lbl_raw = r["组别名(留空自动)"]
             lbl = "" if pd.isna(_lbl_raw) else str(_lbl_raw).strip()
             if lbl in ("None", "nan"):
@@ -1319,7 +1322,9 @@ def page_new_experiment():
                 else:
                     gc["acceptor_additives"] = ms_list_a if ms_list_a else _base_list_a
             # 备注（手动文本 + 异常标签 + 孔位 + 异常孔位）
-            gc["group_note"] = str(r["备注(手动输入)"]).strip()
+            _gn_raw = r.get("备注(手动输入)", "")
+            _gn = "" if pd.isna(_gn_raw) else str(_gn_raw).strip()
+            gc["group_note"] = "" if _gn in ("None", "nan") else _gn
             gc["note_tags"] = list(quick_add["note_tags"].get(g) or [])
             gc["well_position"] = json.dumps(
                 list(quick_add.get("well_positions", {}).get(g) or []), ensure_ascii=False)
@@ -1654,10 +1659,24 @@ def page_new_experiment():
             # 标记进入标准品剔除步骤
             st.session_state["_std_check_eid"] = eid
             st.session_state["_std_check_folder"] = sel
+            # 清解析缓存与详情下拉缓存：同文件夹重生成/新物质立即生效
+            st.session_state.pop("_excl_res_cache", None)
+            st.session_state.pop("_excl_res_cache_sig", None)
+            _gdo_clear2 = getattr(globals().get("_global_detail_options"), "clear", None)
+            if _gdo_clear2:
+                try:
+                    _gdo_clear2()
+                except Exception:
+                    pass
 
-            def _ne_next_folder_cb():
-                st.session_state.pop("_ne_loaded_folder", None)
-            st.button("▶ 录入下一个文件夹", key="ne_next_folder", on_click=_ne_next_folder_cb)
+            st.session_state["_ne_last_generated"] = sel
+    # ▶ 录入下一个文件夹：生成成功后常驻显示（回调需按钮真实存在才触发）
+    if st.session_state.get("_ne_last_generated") == sel:
+        def _ne_next_folder_cb():
+            st.session_state.pop("_ne_loaded_folder", None)
+            st.session_state.pop("_ne_last_generated", None)
+        st.button("▶ 录入下一个文件夹", key="ne_next_folder", on_click=_ne_next_folder_cb)
+
     # —— 6) 标准品剔除步骤（生成后；仅对刚生成的那个文件夹显示）——
     if st.session_state.get("_std_check_folder") != sel:
         st.session_state.pop("_std_check_eid", None)
@@ -1689,9 +1708,11 @@ def page_new_experiment():
                 # —— 自动剔除（标准品针）：仅预勾选，不自动保存 ——
                 _auto_std_key = f"_auto_std_plan_{std_eid}"
                 _auto_std_plan = st.session_state.get(_auto_std_key) or {}
-                _auto_std_labels = set()
+                _auto_std_labels_all = set()
+                _auto_std_labels_by_phase = {}
                 for (_pc, _nm), _lst in _auto_std_plan.items():
-                    _auto_std_labels |= set(_lst)
+                    _auto_std_labels_all |= set(_lst)
+                    _auto_std_labels_by_phase.setdefault(_pc, set()).update(_lst)
 
                 def _build_std_blocks():
                     """从 res_chk.df 构建所有标准品块（两相 × 各名）"""
@@ -1772,7 +1793,10 @@ def page_new_experiment():
                             _m_p.insert(0, "峰面积总和", row_sum_p)
                             _m_p.insert(1, "偏离度", dev_p.round(3))
                             _m_p.insert(0, "剔除",
-                                        [n in (_saved_needles_step6 | _auto_std_labels) for n in std_mat_p.index])
+                                        [n in (_saved_needles_step6 |
+                                               (_auto_std_labels_all if _std_link else
+                                                _auto_std_labels_by_phase.get(phase_cat, set())))
+                                         for n in std_mat_p.index])
                             _num_cols_p = [c for c in _m_p.columns if c != "剔除"]
                             _ed_p = st.data_editor(
                                 _m_p,
@@ -1897,6 +1921,9 @@ def page_new_experiment():
                     # 按联动扩展后的实际剔除对计数（同系列/同名标准品时勾任一相，两相同号针同剔）
                     n_acc = len(_pairs_by_phase.get("std_acceptor") or [])
                     n_don = len(_pairs_by_phase.get("std_donor") or [])
+                    st.session_state.pop(f"_auto_std_plan_{std_eid}", None)
+                    st.session_state.pop(f"_auto_std_card_{std_eid}", None)
+                    st.session_state.get("_excl_res_cache", {}).pop(st.session_state["_std_check_folder"], None)
                     st.session_state["_std_saved_msg"] = (
                         f"✅ 已剔除受体相标准品 {n_acc} 针、供体相标准品 {n_don} 针，**已保存到数据库**"
                         f"（均值/RSD/回收率已重算），**已重新生成 DATA.xlsx**："
@@ -2081,8 +2108,14 @@ def page_experiment_list():
     for _c, _f in [("pH_donor", "{:.1f}"), ("pH_acceptor", "{:.1f}"),
                    ("extract_time", "{:.0f}"), ("extract_voltage", "{:.0f}")]:
         if _c in gcond_display.columns:
-            gcond_display[_c] = gcond_display[_c].map(
-                lambda v, f=_f: f.format(float(v)) if pd.notna(v) and str(v) != "" else "")
+            def _fmt_num(v, f=_f):
+                if pd.isna(v) or str(v) == "":
+                    return ""
+                try:
+                    return f.format(float(v))
+                except (TypeError, ValueError):
+                    return str(v)
+            gcond_display[_c] = gcond_display[_c].map(_fmt_num)
     # 列名中文化（不再暴露 grp/group_label 等数据库字段名）+ 去内部列
     _GC_CN = {"grp": "组", "group_label": "组别名", "slm_main": "主SLM", "slm_additives": "SLM添加剂",
               "pH_donor": "供体相pH", "donor_composition": "供体相成分", "donor_buffer_conc": "供体相缓冲剂浓度",
@@ -3342,6 +3375,8 @@ def _exclusion_ui(eid, folder, group_labels):
             except Exception as e:
                 st.caption(f"（Excel 同步更新失败：{e}）")
             # 一次性提示：先存 session_state 再 rerun（直接 st.success 后 rerun 用户看不到）
+            st.session_state.pop(f"_auto_smp_plan_{eid}", None)
+            st.session_state.pop(f"_auto_smp_card_{eid}", None)
             st.toast("剔除已保存", icon="✅")
             st.session_state[f"_excl_saved_msg_{eid}"] = (
                 f"✅ 已剔除 {len(all_excl)} 个样本，**已保存到数据库并重新生成 DATA.xlsx**"
@@ -3736,6 +3771,7 @@ def _edit_experiment_ui(eid, row, folder):
                 M.save_metrics(conn, eid, row["exp_date"], metrics, res.analytes, res.groups)
                 M.save_qc_summary(conn, eid, row["exp_date"], res, res.analytes, default_qc=_dqc_ed)
                 st.session_state.get("_excl_res_cache", {}).pop(folder, None)
+                st.session_state.pop(f"_auto_std_plan_ed_{eid}", None)
                 _n_acc_m = len(_pairs_by_phase_ed.get("std_acceptor") or []) if std_ui_ok else 0
                 _n_don_m = len(_pairs_by_phase_ed.get("std_donor") or []) if std_ui_ok else 0
                 st.session_state[f"_ed_regen_msg_{eid}"] = (
@@ -4345,6 +4381,9 @@ def _build_summary_data(mdf: pd.DataFrame, exps_min: pd.DataFrame,
 
     from collections import Counter as _Counter
     _date_cnt = _Counter(exps_min["exp_date"].tolist())
+    # 同实验重名组别名去重（与详情页 dedup_labels 同规则），防透视时静默合并丢列
+    for _eid2 in labels_by_eid:
+        labels_by_eid[_eid2] = dedup_labels(labels_by_eid[_eid2])
     records = []
     for _, erow in exps_min.iterrows():
         eid = int(erow["id"])
@@ -5459,7 +5498,8 @@ def page_observations():
     with st.expander("🗑 删除记录"):
         _del_idx = st.selectbox("选择要删除的记录", show.index.tolist(),
                                 format_func=lambda i: f"{show.loc[i, '记录时间']} | {str(show.loc[i, '记录内容'])[:40]}（#{int(show.loc[i, 'id'])}）")
-        _obs_del_confirm = st.checkbox("我确认删除这条观察记录", key="obs_del_confirm")
+        _obs_del_confirm = st.checkbox("我确认删除这条观察记录",
+                                       key=f"obs_del_confirm_{int(show.loc[_del_idx, 'id'])}")
         if st.button("🗑 确认删除", type="secondary", disabled=not _obs_del_confirm):
             M.delete_observation(int(show.loc[_del_idx, "id"]))
             st.session_state["_flash_msg"] = "已删除该条观察记录。"
