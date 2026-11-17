@@ -3694,7 +3694,6 @@ def _edit_experiment_ui(eid, row, folder):
                         width="stretch", hide_index=True)
 
         # 保存结果一次性提示（按钮在下方：保存修改并重新生成 DATA.xlsx）
-        st.toast("修改已保存", icon="✅")
         msg_key_ed2 = f"_ed_regen_msg_{eid}"
         if st.session_state.get(msg_key_ed2):
             st.success(st.session_state[msg_key_ed2])
