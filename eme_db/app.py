@@ -1761,7 +1761,9 @@ def page_new_experiment():
                                 _ph_cn = "受体相" if _pc3 == "std_acceptor" else "供体相"
                                 st.caption(f"✅ {_ph_cn}「{_nm3}」：超阈 {_b2[0]}→{_a2[0]}，RSD%累加 {_b2[1]:.1f}→{_a2[1]:.1f}")
                         if _auto_std_card.get("blocked"):
-                            st.caption("被 Q 检验拦下：" + "、".join(sorted({b["unit"] for b in _auto_std_card["blocked"]})))
+                            st.caption("🔒 以下针的峰面积偏差在统计正常范围内（Dixon Q 检验通过），"
+                                       "不属于离群值——剔除它们只会让 RSD 数字变好看，并没有科学依据，故不剔除："
+                                       + "、".join(sorted({b["unit"] for b in _auto_std_card["blocked"]})))
                         if st.button("✖ 清除自动建议（标准品）", key="auto_std_clear"):
                             st.session_state.pop(_auto_std_key, None)
                             st.session_state.pop(f"_auto_std_card_{std_eid}", None)
@@ -1787,7 +1789,11 @@ def page_new_experiment():
                             mean_p = row_sum_p.mean()
                             dev_p = (row_sum_p - mean_p).abs() / (abs(mean_p) if mean_p else 1)
                             worst_p = dev_p.idxmax()
-                            st.warning(f"🔴 推荐剔除（偏离最大）：**{worst_p}**（偏离度 {dev_p.max():.3f}）")
+                            if dev_p.max() > 0.15:
+                                st.warning(f"🔴 推荐剔除（偏离最大）：**{worst_p}**（偏离度 {dev_p.max():.1%}，"
+                                           f"明显高于其余针；确认离群可勾选下方剔除列）")
+                            else:
+                                st.success(f"✅ 各针一致性良好（最大偏离 {dev_p.max():.1%}），无需剔除")
                             # 合并表：进样针（索引，冻结）+ 剔除复选框（冻结）+ 峰面积总和/偏离度/各物质（只读）
                             _m_p = std_mat_p.copy()
                             _m_p.insert(0, "峰面积总和", row_sum_p)
@@ -3247,7 +3253,8 @@ def _exclusion_ui(eid, folder, group_labels):
             else:
                 st.caption("（本次建议未改善任何组的 RSD）")
             if _auto_card.get("blocked"):
-                st.caption("被 Q 检验拦下（非统计离群，不剔除）："
+                st.caption("🔒 以下样本的峰面积偏差在统计正常范围内（Dixon Q 检验通过），"
+                           "不属于离群值——剔除它们只会让 RSD 数字变好看，并没有科学依据，故不剔除："
                            + "、".join(sorted({b["unit"] for b in _auto_card["blocked"]})))
             if st.button("✖ 清除自动建议", key="auto_excl_clear"):
                 st.session_state.pop(_auto_plan_key, None)
@@ -3579,7 +3586,11 @@ def _edit_experiment_ui(eid, row, folder):
             mean_sum = row_sum.mean()
             dev = (row_sum - mean_sum).abs() / (abs(mean_sum) if mean_sum else 1)
             worst = dev.idxmax()
-            st.warning(f"🔴 推荐剔除（偏离最大）：**{worst}**（偏离度 {dev.max():.3f}）")
+            if dev.max() > 0.15:
+                st.warning(f"🔴 推荐剔除（偏离最大）：**{worst}**（偏离度 {dev.max():.1%}，"
+                           f"明显高于其余针；确认离群可勾选下方剔除列）")
+            else:
+                st.success(f"✅ 各针一致性良好（最大偏离 {dev.max():.1%}），无需剔除")
             if st.button("⚡ 自动剔除（保守）", key=f"auto_std_ed_{keyp}_{eid}",
                          help="按 Dixon Q 离群证据自动预勾选一根针；可手动调整"):
                 _units3 = {idx: {a: (float(v) if pd.notna(v) else None) for a, v in row.items()}
